@@ -1,6 +1,7 @@
 package jsonpath
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -247,17 +248,19 @@ func (l *Lexer) skipWhitespace() {
 
 // readString 读取字符串字面量（支持单引号和双引号）
 func (l *Lexer) readString() Token {
-	var sb strings.Builder
 	pos := l.pos
+	var sb strings.Builder
 
-	quote := l.next() // 获取引号字符
+	quote := l.next() // 获取引号字符 (' 或 ")
 	for {
 		r := l.next()
-		if r == utf8.RuneError { // 未闭合的字符串
-			return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
+		if r == utf8.RuneError {
+			// 没有找到匹配的引号，返回非法 token
+			return Token{Type: TokenIllegal, Value: l.input[pos:l.pos], Pos: pos}
 		}
 
 		if r == quote {
+			// 找到匹配的引号，字符串结束
 			break
 		}
 
@@ -281,11 +284,29 @@ func (l *Lexer) readString() Token {
 			case '/', '\\', '\'', '"':
 				sb.WriteRune(escaped)
 			case 'u':
-				rv := l.readUnicodeEscape()
-				if rv == unicode.ReplacementChar {
+				if l.pos+4 > len(l.input) {
 					return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
 				}
-				sb.WriteRune(rv)
+				r1, err := strconv.ParseUint(l.input[l.pos:l.pos+4], 16, 64)
+				if err != nil {
+					return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
+				}
+				l.pos += 4
+
+				if utf16.IsSurrogate(rune(r1)) {
+					// 处理代理对
+					if l.pos+6 > len(l.input) || l.input[l.pos:l.pos+2] != "\\u" {
+						return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
+					}
+					r2, err := strconv.ParseUint(l.input[l.pos+2:l.pos+6], 16, 64)
+					if err != nil {
+						return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
+					}
+					sb.WriteRune(utf16.DecodeRune(rune(r1), rune(r2)))
+					l.pos += 6
+				} else {
+					sb.WriteRune(rune(r1))
+				}
 			default:
 				return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
 			}
@@ -294,52 +315,6 @@ func (l *Lexer) readString() Token {
 		}
 	}
 	return Token{Type: TokenString, Value: sb.String(), Pos: pos}
-}
-
-func (l *Lexer) readUnicodeEscape() rune {
-	if l.pos+4 > len(l.input) {
-		return unicode.ReplacementChar
-	}
-	r1, ok := parseHex4(l.input[l.pos : l.pos+4])
-	if !ok {
-		return unicode.ReplacementChar
-	}
-	l.pos += 4
-
-	if utf16.IsSurrogate(r1) {
-		if l.pos+6 > len(l.input) || l.input[l.pos:l.pos+2] != "\\u" {
-			return unicode.ReplacementChar
-		}
-		r2, ok := parseHex4(l.input[l.pos+2 : l.pos+6])
-		if ok {
-			combined := utf16.DecodeRune(r1, r2)
-			l.pos += 6
-			return combined
-		}
-		return unicode.ReplacementChar
-	}
-	return r1
-}
-
-func parseHex4(s string) (rune, bool) {
-	if len(s) != 4 {
-		return 0, false
-	}
-	var r rune
-	for _, c := range []byte(s) {
-		r <<= 4
-		switch {
-		case '0' <= c && c <= '9':
-			r += rune(c - '0')
-		case 'a' <= c && c <= 'f':
-			r += rune(c - 'a' + 10)
-		case 'A' <= c && c <= 'F':
-			r += rune(c - 'A' + 10)
-		default:
-			return 0, false
-		}
-	}
-	return r, true
 }
 
 // readNumber 读取数字字面量
@@ -453,7 +428,7 @@ func isNameFirst(r rune) bool {
 
 // name-char = name-first / DIGIT
 func isNameChar(r rune) bool {
-	return isNameFirst(r) || unicode.IsDigit(r)
+	return isNameFirst(r) || isDigit(r)
 }
 
 // function-name-first = LCALPHA
