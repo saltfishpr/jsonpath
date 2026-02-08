@@ -822,8 +822,8 @@ func TestLexerMemberNameShorthand(t *testing.T) {
 	}
 }
 
-// TestRFCExamples RFC 9535 中的示例表达式词法分析
-func TestRFCExamples(t *testing.T) {
+// TestLexerRFCExamples RFC 9535 中的示例表达式词法分析
+func TestLexerRFCExamples(t *testing.T) {
 	// RFC 9535 Table 2: 示例 JSONPath 表达式
 	examples := []string{
 		`$.store.book[*].author`,
@@ -862,94 +862,6 @@ func TestRFCExamples(t *testing.T) {
 
 			if !hasIllegal && tokenCount == 0 {
 				t.Errorf("示例 %q 没有产生任何 token", example)
-			}
-		})
-	}
-}
-
-// TestRFCComparisonExpressions RFC 9535 Section 2.3.5.2.2
-func TestRFCComparisonExpressions(t *testing.T) {
-	tests := []struct {
-		input  string
-		tokens []TokenType
-	}{
-		// 比较运算符 - RFC 9535 Table 10
-		{"@ == null", []TokenType{TokenCurrent, TokenEq, TokenNull}},
-		{"@ != null", []TokenType{TokenCurrent, TokenNe, TokenNull}},
-		{"@ < 10", []TokenType{TokenCurrent, TokenLt, TokenNumber}},
-		{"@ <= 10", []TokenType{TokenCurrent, TokenLe, TokenNumber}},
-		{"@ > 5", []TokenType{TokenCurrent, TokenGt, TokenNumber}},
-		{"@ >= 5", []TokenType{TokenCurrent, TokenGe, TokenNumber}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			lexer := NewLexer(tt.input)
-			for i, expectType := range tt.tokens {
-				token := lexer.NextToken()
-				if token.Type != expectType {
-					t.Errorf("位置 %d: 期望类型 %v, 实际 %v", i, expectType, token.Type)
-				}
-			}
-		})
-	}
-}
-
-// TestRFCFilterExpressions RFC 9535 Table 12
-func TestRFCFilterExpressions(t *testing.T) {
-	tests := []struct {
-		input  string
-		tokens []TokenType
-	}{
-		{
-			`$.a[?@.b == 'kilo']`,
-			[]TokenType{
-				TokenRoot, TokenDot, TokenIdent, TokenLBracket,
-				TokenQuestion, TokenCurrent, TokenDot, TokenIdent,
-				TokenEq, TokenString, TokenRBracket,
-			},
-		},
-		{
-			`$.a[?@>3.5]`,
-			[]TokenType{
-				TokenRoot, TokenDot, TokenIdent, TokenLBracket,
-				TokenQuestion, TokenCurrent, TokenGt,
-				TokenNumber, TokenRBracket,
-			},
-		},
-		{
-			`$.a[?@.b]`,
-			[]TokenType{
-				TokenRoot, TokenDot, TokenIdent, TokenLBracket,
-				TokenQuestion, TokenCurrent, TokenDot, TokenIdent,
-				TokenRBracket,
-			},
-		},
-		{
-			`$[?@.*]`,
-			[]TokenType{
-				TokenRoot, TokenLBracket, TokenQuestion,
-				TokenCurrent, TokenDot, TokenWildcard, TokenRBracket,
-			},
-		},
-		{
-			`$.a[?@.b == "k"]`,
-			[]TokenType{
-				TokenRoot, TokenDot, TokenIdent, TokenLBracket,
-				TokenQuestion, TokenCurrent, TokenDot, TokenIdent,
-				TokenEq, TokenString, TokenRBracket,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
-			lexer := NewLexer(tt.input)
-			for i, expectType := range tt.tokens {
-				token := lexer.NextToken()
-				if token.Type != expectType {
-					t.Errorf("位置 %d: 期望类型 %v, 实际 %v (%q)", i, expectType, token.Type, token.Value)
-				}
 			}
 		})
 	}

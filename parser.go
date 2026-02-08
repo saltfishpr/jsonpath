@@ -37,7 +37,7 @@ func (p *Parser) expectToken(tokenType TokenType) error {
 }
 
 // parseQuery 解析完整的 JSONPath 查询
-// RFC 9535: jsonpath-query = root-identifier segments
+// jsonpath-query = root-identifier segments
 func (p *Parser) parseQuery() (*Query, error) {
 	query := &Query{}
 
@@ -45,6 +45,7 @@ func (p *Parser) parseQuery() (*Query, error) {
 	if err := p.expectToken(TokenRoot); err != nil {
 		return nil, err
 	}
+	p.advance()
 
 	for p.curr.Type != TokenEOF {
 		segment, err := p.parseSegment()
@@ -58,24 +59,27 @@ func (p *Parser) parseQuery() (*Query, error) {
 }
 
 // parseSegment 解析一个路径段
+// segment = child-segment / descendant-segment
 func (p *Parser) parseSegment() (*Segment, error) {
 	switch p.curr.Type {
 	case TokenDotDot:
 		p.advance()
 		return p.parseDescendantSegment()
-	case TokenDot:
+
+	case TokenDot: // .name / .*
 		p.advance()
 		return p.parseDotSegment()
-	case TokenLBracket:
-		p.advance()
+
+	case TokenLBracket: // .[
 		return p.parseBracketSegment(ChildSegment)
+
 	default:
 		return nil, fmt.Errorf("unexpected token %s(%q), expected '.' or '..'", p.curr.Type, p.curr.Value)
 	}
 }
 
 // parseDescendantSegment 解析后代段 ..name 或 ..[*]
-// RFC 9535: descendant-segment = ".." name-segment / "..[" selectors "]"
+// descendant-segment = ".." name-segment / "..[" selectors "]"
 //
 //	name-segment = "." member-name-shorthand / "[" name-selector "]"
 //	member-name-shorthand = *identifier / null / true / false
@@ -84,26 +88,19 @@ func (p *Parser) parseDescendantSegment() (*Segment, error) {
 
 	switch p.curr.Type {
 	case TokenLBracket:
-		// ..[selectors] 形式
-		p.advance()
-		selectors, err := p.parseSelectors()
-		if err != nil {
-			return nil, err
-		}
-		segment.Selectors = selectors
-		return segment, nil
+		return p.parseBracketSegment(DescendantSegment)
 
 	case TokenWildcard:
-		// ..* 是 ..[*] 的简写
-		segment.Selectors = []*Selector{{Kind: WildcardSelector}}
+		// ..*
+		segment.Selectors = []*Selector{{Type: WildcardSelector}}
 		p.advance()
 		return segment, nil
 
 	case TokenIdent, TokenNull, TokenTrue, TokenFalse:
-		// ..name 是 ..['name'] 的简写
+		// ..name
 		name := p.curr.Value
 		segment.Selectors = []*Selector{{
-			Kind: NameSelector,
+			Type: NameSelector,
 			Name: name,
 		}}
 		p.advance()
@@ -114,23 +111,20 @@ func (p *Parser) parseDescendantSegment() (*Segment, error) {
 	}
 }
 
-// parseDotSegment 解析子段的点简写形式 .name 或 .*
-// RFC 9535: child-segment-shorthand = "." ( wildcard / member-name-shorthand )
+// parseDotSegment .name / .*
 func (p *Parser) parseDotSegment() (*Segment, error) {
 	segment := &Segment{Type: ChildSegment}
 
 	switch p.curr.Type {
 	case TokenWildcard:
-		// .* 是 [*] 的简写
-		segment.Selectors = []*Selector{{Kind: WildcardSelector}}
+		segment.Selectors = []*Selector{{Type: WildcardSelector}}
 		p.advance()
 		return segment, nil
 
 	case TokenIdent, TokenNull, TokenTrue, TokenFalse:
-		// .name 是 ['name'] 的简写
 		name := p.curr.Value
 		segment.Selectors = []*Selector{{
-			Kind: NameSelector,
+			Type: NameSelector,
 			Name: name,
 		}}
 		p.advance()
@@ -141,11 +135,14 @@ func (p *Parser) parseDotSegment() (*Segment, error) {
 	}
 }
 
-// parseBracketSegment 解析括号表示法 [selector1, selector2, ...]
-// RFC 9535: child-segment = "[" selectors "]"
-//
-//	descendant-segment = ".." "[" selectors "]"
+// parseBracketSegment 解析括号表示法
+// bracketed-selection = "[" S selector *(S "," S selector) S "]"
 func (p *Parser) parseBracketSegment(segType SegmentType) (*Segment, error) {
+	if err := p.expectToken(TokenLBracket); err != nil {
+		return nil, err
+	}
+	p.advance()
+
 	segment := &Segment{Type: segType}
 
 	selectors, err := p.parseSelectors()
@@ -154,17 +151,14 @@ func (p *Parser) parseBracketSegment(segType SegmentType) (*Segment, error) {
 	}
 	segment.Selectors = selectors
 
-	// 期望闭合括号
 	if err := p.expectToken(TokenRBracket); err != nil {
-		return nil, fmt.Errorf("expected ']', got %s(%q) at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
+		return nil, err
 	}
 	p.advance()
 
 	return segment, nil
 }
 
-// parseSelectors 解析逗号分隔的选择器列表
-// RFC 9535: selectors = selector ["," selectors]
 func (p *Parser) parseSelectors() ([]*Selector, error) {
 	var selectors []*Selector
 
@@ -189,15 +183,13 @@ func (p *Parser) parseSelectors() ([]*Selector, error) {
 }
 
 // parseSelector 解析单个选择器
-// RFC 9535: selector = name-selector / wildcard-selector / index-selector /
-//
-//	slice-selector / filter-selector
+// selector = name-selector / wildcard-selector / index-selector / slice-selector / filter-selector
 func (p *Parser) parseSelector() (*Selector, error) {
 	switch p.curr.Type {
 	case TokenString:
 		// 名称选择器 'name' 或 "name"
 		sel := &Selector{
-			Kind: NameSelector,
+			Type: NameSelector,
 			Name: p.curr.Value,
 		}
 		p.advance()
@@ -205,36 +197,32 @@ func (p *Parser) parseSelector() (*Selector, error) {
 
 	case TokenWildcard:
 		// 通配符选择器 *
-		sel := &Selector{Kind: WildcardSelector}
+		sel := &Selector{Type: WildcardSelector}
 		p.advance()
 		return sel, nil
+
+	case TokenNumber:
+		if p.peek.Type == TokenColon {
+			return p.parseSliceSelector()
+		}
+		// 索引选择器：数字后面是 ] 或 ,
+		return p.parseIndexSelector()
+
+	case TokenColon:
+		return p.parseSliceSelector()
 
 	case TokenQuestion:
 		// 过滤器选择器 ?<logical-expr>
 		return p.parseFilterSelector()
-
-	case TokenNumber, TokenColon:
-		// 索引选择器或切片选择器
-		return p.parseIndexOrSliceSelector()
 
 	default:
 		return nil, fmt.Errorf("unexpected token %s(%q) in selector at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
 	}
 }
 
-// parseIndexOrSliceSelector 解析索引或切片选择器
-// RFC 9535: index-selector = int
-//
-//	slice-selector = [start S] ":" S [end S] [":" [S step ]]
-func (p *Parser) parseIndexOrSliceSelector() (*Selector, error) {
-	// 检查是否是切片（包含冒号）
-	if p.curr.Type == TokenColon || (p.curr.Type == TokenNumber && p.peek.Type == TokenColon) {
-		return p.parseSliceSelector()
-	}
-
-	// 索引选择器
-	if p.curr.Type != TokenNumber {
-		return nil, fmt.Errorf("expected number or ':', got %s(%q) at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
+func (p *Parser) parseIndexSelector() (*Selector, error) {
+	if err := p.expectToken(TokenNumber); err != nil {
+		return nil, err
 	}
 
 	index, err := parseInteger(p.curr.Value)
@@ -242,16 +230,14 @@ func (p *Parser) parseIndexOrSliceSelector() (*Selector, error) {
 		return nil, fmt.Errorf("invalid index %q at position %d: %w", p.curr.Value, p.curr.Pos, err)
 	}
 
-	sel := &Selector{
-		Kind:  IndexSelector,
-		Index: index,
-	}
 	p.advance()
-	return sel, nil
+	return &Selector{
+		Type:  IndexSelector,
+		Index: index,
+	}, nil
 }
 
 // parseSliceSelector 解析数组切片选择器 start:end:step
-// RFC 9535 Section 2.3.4
 func (p *Parser) parseSliceSelector() (*Selector, error) {
 	slice := &SliceParams{}
 
@@ -295,15 +281,15 @@ func (p *Parser) parseSliceSelector() (*Selector, error) {
 		p.advance()
 	}
 
-	return &Selector{Kind: SliceSelector, Slice: slice}, nil
+	return &Selector{Type: SliceSelector, Slice: slice}, nil
 }
 
 // parseFilterSelector 解析过滤器选择器 ?<logical-expr>
-// RFC 9535: filter-selector = "?" S logical-expr
+// filter-selector = "?" S logical-expr
 func (p *Parser) parseFilterSelector() (*Selector, error) {
 	// 当前 token 应该是 TokenQuestion
-	if p.curr.Type != TokenQuestion {
-		return nil, fmt.Errorf("expected '?', got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenQuestion); err != nil {
+		return nil, err
 	}
 	p.advance()
 
@@ -312,18 +298,17 @@ func (p *Parser) parseFilterSelector() (*Selector, error) {
 		return nil, err
 	}
 
-	return &Selector{Kind: FilterSelector, Filter: expr}, nil
+	return &Selector{Type: FilterSelector, Filter: expr}, nil
 }
 
 // parseLogicalExpr 解析逻辑表达式
-// RFC 9535: logical-or-expr = logical-and-expr *(S "||" S logical-and-expr)
-//
-//	logical-and-expr = basic-expr *(S "&&" S basic-expr)
+// logical-expr = logical-or-expr
 func (p *Parser) parseLogicalExpr() (*FilterExpr, error) {
 	return p.parseLogicalOrExpr()
 }
 
 // parseLogicalOrExpr 解析逻辑或表达式
+// logical-or-expr = logical-and-expr *(S "||" S logical-and-expr)
 func (p *Parser) parseLogicalOrExpr() (*FilterExpr, error) {
 	left, err := p.parseLogicalAndExpr()
 	if err != nil {
@@ -337,7 +322,7 @@ func (p *Parser) parseLogicalOrExpr() (*FilterExpr, error) {
 			return nil, err
 		}
 		left = &FilterExpr{
-			Kind:  FilterLogicalOr,
+			Type:  FilterLogicalOr,
 			Left:  left,
 			Right: right,
 		}
@@ -347,6 +332,7 @@ func (p *Parser) parseLogicalOrExpr() (*FilterExpr, error) {
 }
 
 // parseLogicalAndExpr 解析逻辑与表达式
+// logical-and-expr = basic-expr *(S "&&" S basic-expr)
 func (p *Parser) parseLogicalAndExpr() (*FilterExpr, error) {
 	left, err := p.parseBasicExpr()
 	if err != nil {
@@ -360,7 +346,7 @@ func (p *Parser) parseLogicalAndExpr() (*FilterExpr, error) {
 			return nil, err
 		}
 		left = &FilterExpr{
-			Kind:  FilterLogicalAnd,
+			Type:  FilterLogicalAnd,
 			Left:  left,
 			Right: right,
 		}
@@ -370,83 +356,117 @@ func (p *Parser) parseLogicalAndExpr() (*FilterExpr, error) {
 }
 
 // parseBasicExpr 解析基本表达式
-// RFC 9535: basic-expr = paren-expr / comparison-expr / test-expr
+// basic-expr = paren-expr / comparison-expr / test-expr
 func (p *Parser) parseBasicExpr() (*FilterExpr, error) {
-	// 检查逻辑非运算符
-	negated := false
-	if p.curr.Type == TokenLNot {
-		negated = true
-		p.advance()
+	if p.isLogicalExprEnd() {
+		return nil, fmt.Errorf("unexpected end of filter expression at position %d", p.curr.Pos)
 	}
 
-	switch p.curr.Type {
-	case TokenLParen:
-		// 括号表达式
-		p.advance()
-		expr, err := p.parseLogicalExpr()
-		if err != nil {
-			return nil, err
-		}
-		if err := p.expectToken(TokenRParen); err != nil {
-			return nil, err
-		}
-		p.advance()
-		result := &FilterExpr{Kind: FilterParen, Operand: expr}
-		if negated {
-			result = &FilterExpr{Kind: FilterLogicalNot, Operand: result}
-		}
-		return result, nil
+	// paren-expr: [logical-not-op S] "(" S logical-expr S ")"
+	// 检查是否是括号表达式：! ( 或 (
+	if p.curr.Type == TokenLParen {
+		return p.parseParenExpr()
+	}
 
-	case TokenIdent:
-		// 可能是测试表达式（存在性测试）或函数表达式
+	if p.curr.Type == TokenLNot {
+		// ! 后面如果是 (，则是 paren-expr
+		// 否则是带 logical-not 的 test-expr
 		if p.peek.Type == TokenLParen {
-			// 函数表达式
-			funcExpr, err := p.parseFunctionExpr()
-			if err != nil {
-				return nil, err
-			}
-			return &FilterExpr{Kind: FilterTest, Test: &TestExpr{FuncExpr: funcExpr}}, nil
+			return p.parseParenExpr()
 		}
-		// 降级为测试表达式（存在性测试）
-		fallthrough
-
-	default:
-		// 比较表达式或测试表达式
-		if p.isComparisonOp(p.peek.Type) {
-			comp, err := p.parseComparisonExpr()
-			if err != nil {
-				return nil, err
-			}
-			if negated {
-				return &FilterExpr{Kind: FilterLogicalNot, Operand: &FilterExpr{Kind: FilterComparison, Comp: comp}}, nil
-			}
-			return &FilterExpr{Kind: FilterComparison, Comp: comp}, nil
-		}
-
-		// 测试表达式（存在性测试）
+		// !@ 或 !$ 或 !func(...) -> test-expr with negation
+		p.advance() // 消费 "!"
+		// 解析 test-expr 部分
 		test, err := p.parseTestExpr()
 		if err != nil {
 			return nil, err
 		}
-		if negated {
-			test.Negated = true
-		}
-		return &FilterExpr{Kind: FilterTest, Test: test}, nil
+		// 返回 FilterLogicalNot，其中 Operand 是 FilterTest
+		return &FilterExpr{
+			Type: FilterLogicalNot,
+			Operand: &FilterExpr{
+				Type: FilterTest,
+				Test: test,
+			},
+		}, nil
 	}
+
+	// 区分 comparison-expr 和 test-expr
+	// 使用回溯策略：先尝试比较表达式，失败则尝试测试表达式
+	return p.parseBasicExprWithFallback()
 }
 
-// isComparisonOp 检查是否是比较运算符
-func (p *Parser) isComparisonOp(tokenType TokenType) bool {
-	switch tokenType {
-	case TokenEq, TokenNe, TokenLt, TokenLe, TokenGt, TokenGe:
-		return true
-	default:
-		return false
+// isLogicalExprEnd 检查是否到达逻辑表达式结束位置
+func (p *Parser) isLogicalExprEnd() bool {
+	return p.curr.Type == TokenRBracket ||
+		p.curr.Type == TokenRParen ||
+		p.curr.Type == TokenComma ||
+		p.curr.Type == TokenEOF
+}
+
+// parseBasicExprWithFallback 先尝试比较表达式，失败后尝试测试表达式
+func (p *Parser) parseBasicExprWithFallback() (*FilterExpr, error) {
+	// 保存当前状态
+	savedCurr := p.curr
+	savedPeek := p.peek
+	savedLexerPos := p.lexer.pos
+
+	// 尝试解析比较表达式
+	comp, err := p.parseComparisonExpr()
+	if err == nil {
+		return &FilterExpr{Type: FilterComparison, Comp: comp}, nil
 	}
+
+	// 失败，恢复状态并尝试测试表达式
+	p.curr = savedCurr
+	p.peek = savedPeek
+	p.lexer.pos = savedLexerPos
+
+	test, err := p.parseTestExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &FilterExpr{Type: FilterTest, Test: test}, nil
+}
+
+// parseParenExpr 解析括号表达式
+// paren-expr = [logical-not-op S] "(" S logical-expr S ")"
+func (p *Parser) parseParenExpr() (*FilterExpr, error) {
+	hasNot := p.curr.Type == TokenLNot
+	if hasNot {
+		p.advance() // 消费 "!"
+	}
+
+	if p.curr.Type != TokenLParen {
+		return nil, fmt.Errorf("expected '(' after '!', got %s(%q)", p.curr.Type, p.curr.Value)
+	}
+	p.advance() // 消费 "("
+
+	expr, err := p.parseLogicalExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.curr.Type != TokenRParen {
+		return nil, fmt.Errorf("expected ')' after filter expression, got %s(%q)", p.curr.Type, p.curr.Value)
+	}
+	p.advance() // 消费 ")"
+
+	if hasNot {
+		return &FilterExpr{
+			Type:    FilterLogicalNot,
+			Operand: expr,
+		}, nil
+	}
+
+	return &FilterExpr{
+		Type:    FilterParen,
+		Operand: expr,
+	}, nil
 }
 
 // parseComparisonExpr 解析比较表达式
-// RFC 9535: comparison-expr = comparable S comparison-op S comparable
+// comparison-expr = comparable S comparison-op S comparable
 func (p *Parser) parseComparisonExpr() (*Comparison, error) {
 	left, err := p.parseComparable()
 	if err != nil {
@@ -493,7 +513,7 @@ func (p *Parser) parseComparisonOp() (CompOp, error) {
 }
 
 // parseComparable 解析可比较值
-// RFC 9535: comparable = literal / singular-query / function-expr
+// comparable = literal / singular-query / function-expr
 func (p *Parser) parseComparable() (*Comparable, error) {
 	switch p.curr.Type {
 	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
@@ -502,7 +522,7 @@ func (p *Parser) parseComparable() (*Comparable, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Comparable{Kind: ComparableLiteral, Literal: lit}, nil
+		return &Comparable{Type: ComparableLiteral, Literal: lit}, nil
 
 	case TokenRoot, TokenCurrent:
 		// 单值查询
@@ -510,22 +530,22 @@ func (p *Parser) parseComparable() (*Comparable, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Comparable{Kind: ComparableSingularQuery, SingularQuery: query}, nil
+		return &Comparable{Type: ComparableSingularQuery, SingularQuery: query}, nil
 
 	case TokenIdent:
-		// 可能是函数表达式或单值查询（成员名简写）
+		// 可能是函数表达式或单值查询
 		if p.peek.Type == TokenLParen {
 			// 函数表达式
 			fn, err := p.parseFunctionExpr()
 			if err != nil {
 				return nil, err
 			}
-			return &Comparable{Kind: ComparableFuncExpr, FuncExpr: fn}, nil
+			return &Comparable{Type: ComparableFuncExpr, FuncExpr: fn}, nil
 		}
 		// 降级为字面量（标识符作为字符串字面量）
-		lit := &LiteralValue{Type: LiteralTypeString, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralString, Value: p.curr.Value}
 		p.advance()
-		return &Comparable{Kind: ComparableLiteral, Literal: lit}, nil
+		return &Comparable{Type: ComparableLiteral, Literal: lit}, nil
 
 	default:
 		return nil, fmt.Errorf("unexpected token %s(%q) in comparable at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
@@ -536,23 +556,23 @@ func (p *Parser) parseComparable() (*Comparable, error) {
 func (p *Parser) parseLiteral() (*LiteralValue, error) {
 	switch p.curr.Type {
 	case TokenString:
-		lit := &LiteralValue{Type: LiteralTypeString, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralString, Value: p.curr.Value}
 		p.advance()
 		return lit, nil
 	case TokenNumber:
-		lit := &LiteralValue{Type: LiteralTypeNumber, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralNumber, Value: p.curr.Value}
 		p.advance()
 		return lit, nil
 	case TokenTrue:
-		lit := &LiteralValue{Type: LiteralTypeTrue, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralTrue, Value: p.curr.Value}
 		p.advance()
 		return lit, nil
 	case TokenFalse:
-		lit := &LiteralValue{Type: LiteralTypeFalse, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralFalse, Value: p.curr.Value}
 		p.advance()
 		return lit, nil
 	case TokenNull:
-		lit := &LiteralValue{Type: LiteralTypeNull, Value: p.curr.Value}
+		lit := &LiteralValue{Type: LiteralNull, Value: p.curr.Value}
 		p.advance()
 		return lit, nil
 	default:
@@ -561,10 +581,9 @@ func (p *Parser) parseLiteral() (*LiteralValue, error) {
 }
 
 // parseSingularQuery 解析单值查询
-// RFC 9535: singular-query = rel-singular-query / abs-singular-query
-//
-//	rel-singular-query = current-node-identifier singular-query-segments
-//	abs-singular-query = root-identifier singular-query-segments
+// singular-query = rel-singular-query / abs-singular-query
+// rel-singular-query = current-node-identifier singular-query-segments
+// abs-singular-query = root-identifier singular-query-segments
 func (p *Parser) parseSingularQuery() (*SingularQuery, error) {
 	query := &SingularQuery{}
 
@@ -579,7 +598,6 @@ func (p *Parser) parseSingularQuery() (*SingularQuery, error) {
 		return nil, fmt.Errorf("expected '$' or '@', got %s(%q)", p.curr.Type, p.curr.Value)
 	}
 
-	// 解析单值查询段
 	for p.curr.Type == TokenDot || p.curr.Type == TokenLBracket {
 		seg, err := p.parseSingularSegment()
 		if err != nil {
@@ -597,46 +615,54 @@ func (p *Parser) parseSingularSegment() (*SingularSegment, error) {
 
 	switch p.curr.Type {
 	case TokenDot:
+		// .name
 		p.advance()
-		if p.curr.Type != TokenIdent && p.curr.Type != TokenNull && p.curr.Type != TokenTrue && p.curr.Type != TokenFalse {
+		switch p.curr.Type {
+		case TokenIdent, TokenNull, TokenTrue, TokenFalse:
+			seg.Type = SingularNameSegment
+			seg.Name = p.curr.Value
+			p.advance()
+			return seg, nil
+		default:
 			return nil, fmt.Errorf("expected identifier after '.', got %s(%q)", p.curr.Type, p.curr.Value)
 		}
-		seg.IsIndex = false
-		seg.Name = p.curr.Value
-		p.advance()
-		return seg, nil
 
 	case TokenLBracket:
 		p.advance()
-		defer p.advance() // 消费闭合括号
-
-		if p.curr.Type == TokenString {
-			// 名称选择器 ['name']
-			seg.IsIndex = false
+		switch p.curr.Type {
+		case TokenString:
+			// ['name'] 或 ["name"]
+			seg.Type = SingularNameSegment
 			seg.Name = p.curr.Value
 			p.advance()
-			if p.curr.Type != TokenRBracket {
-				return nil, fmt.Errorf("expected ']', got %s(%q)", p.curr.Type, p.curr.Value)
-			}
-			return seg, nil
-		}
 
-		if p.curr.Type == TokenNumber {
-			// 索引选择器 [0]
+			if err := p.expectToken(TokenRBracket); err != nil {
+				return nil, err
+			}
+			p.advance()
+
+			return seg, nil
+
+		case TokenNumber:
+			// [0]
 			index, err := parseInteger(p.curr.Value)
 			if err != nil {
-				return nil, fmt.Errorf("invalid index: %w", err)
+				return nil, fmt.Errorf("invalid index %q: %w", p.curr.Value, err)
 			}
-			seg.IsIndex = true
+			seg.Type = SingularIndexSegment
 			seg.Index = index
 			p.advance()
-			if p.curr.Type != TokenRBracket {
-				return nil, fmt.Errorf("expected ']', got %s(%q)", p.curr.Type, p.curr.Value)
-			}
-			return seg, nil
-		}
 
-		return nil, fmt.Errorf("expected string or number in singular segment, got %s(%q)", p.curr.Type, p.curr.Value)
+			if err := p.expectToken(TokenRBracket); err != nil {
+				return nil, err
+			}
+			p.advance()
+
+			return seg, nil
+
+		default:
+			return nil, fmt.Errorf("expected string or number in singular query segment, got %s(%q)", p.curr.Type, p.curr.Value)
+		}
 
 	default:
 		return nil, fmt.Errorf("expected '.' or '[', got %s(%q)", p.curr.Type, p.curr.Value)
@@ -644,7 +670,7 @@ func (p *Parser) parseSingularSegment() (*SingularSegment, error) {
 }
 
 // parseTestExpr 解析测试表达式（存在性测试）
-// RFC 9535: test-expr = [logical-not-op S] (filter-query / function-expr)
+// test-expr = [logical-not-op S] (filter-query / function-expr)
 func (p *Parser) parseTestExpr() (*TestExpr, error) {
 	test := &TestExpr{}
 
@@ -682,9 +708,8 @@ func (p *Parser) parseTestExpr() (*TestExpr, error) {
 }
 
 // parseFilterQuery 解析过滤器查询
-// RFC 9535: filter-query = rel-query / jsonpath-query
-//
-//	rel-query = current-node-identifier segments
+// filter-query = rel-query / jsonpath-query
+// rel-query = current-node-identifier segments
 func (p *Parser) parseFilterQuery() (*FilterQuery, error) {
 	query := &FilterQuery{}
 
@@ -700,26 +725,29 @@ func (p *Parser) parseFilterQuery() (*FilterQuery, error) {
 		query.Relative = true
 	}
 
-	// 解析段
+	// 解析段，在遇到结束条件时停止（RBracket, RParen, Comma, EOF）
 	for p.curr.Type == TokenDot || p.curr.Type == TokenDotDot || p.curr.Type == TokenLBracket {
-		seg, err := p.parseSegment()
+		segment, err := p.parseSegment()
 		if err != nil {
 			return nil, err
 		}
-		query.Segments = append(query.Segments, seg)
+		query.Segments = append(query.Segments, segment)
 	}
 
 	return query, nil
 }
 
 // parseFunctionExpr 解析函数表达式
-// RFC 9535: function-expr = function-name "(" S [function-argument *(S "," S function-argument)] S ")"
+// function-expr = function-name "(" S [function-argument *(S "," S function-argument)] S ")"
 func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
 	if p.curr.Type != TokenIdent {
 		return nil, fmt.Errorf("expected function name, got %s(%q)", p.curr.Type, p.curr.Value)
 	}
 
 	name := p.curr.Value
+	if !p.isValidFunctionName(name) {
+		return nil, fmt.Errorf("invalid function name %q", name)
+	}
 	p.advance()
 
 	if p.curr.Type != TokenLParen {
@@ -755,8 +783,18 @@ func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
 	return fn, nil
 }
 
-// parseFuncArg 解析函数参数
-// RFC 9535: function-argument = literal / filter-query / logical-expr / function-expr
+func (p *Parser) isValidFunctionName(name string) bool {
+	for i, ch := range name {
+		if i == 0 && !isFunctionNameFirst(ch) {
+			return false
+		}
+		if !isFunctionNameChar(ch) {
+			return false
+		}
+	}
+	return true
+}
+
 func (p *Parser) parseFuncArg() (*FuncArg, error) {
 	switch p.curr.Type {
 	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
@@ -765,36 +803,58 @@ func (p *Parser) parseFuncArg() (*FuncArg, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &FuncArg{Kind: FuncArgLiteral, Literal: lit}, nil
+		return &FuncArg{Type: FuncArgLiteral, Literal: lit}, nil
 
 	case TokenRoot, TokenCurrent:
-		// 过滤器查询
-		query, err := p.parseFilterQuery()
-		if err != nil {
-			return nil, err
-		}
-		return &FuncArg{Kind: FuncArgFilterQuery, FilterQuery: query}, nil
+		// 可能是过滤器查询或逻辑表达式
+		// 使用回溯策略：先尝试逻辑表达式，失败则尝试过滤器查询
+		return p.parseFuncArgRootOrCurrent()
 
 	case TokenLNot, TokenLParen, TokenIdent:
-		// 逻辑表达式或函数表达式
 		if p.curr.Type == TokenIdent && p.peek.Type == TokenLParen {
 			// 函数表达式
 			fn, err := p.parseFunctionExpr()
 			if err != nil {
 				return nil, err
 			}
-			return &FuncArg{Kind: FuncArgFuncExpr, FuncExpr: fn}, nil
+			return &FuncArg{Type: FuncArgFuncExpr, FuncExpr: fn}, nil
 		}
 		// 逻辑表达式
 		expr, err := p.parseLogicalExpr()
 		if err != nil {
 			return nil, err
 		}
-		return &FuncArg{Kind: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+		return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
 
 	default:
 		return nil, fmt.Errorf("unexpected token %s(%q) in function argument", p.curr.Type, p.curr.Value)
 	}
+}
+
+// parseFuncArgRootOrCurrent 解析以 $ 或 @ 开头的函数参数
+// 先尝试逻辑表达式，失败则尝试过滤器查询
+func (p *Parser) parseFuncArgRootOrCurrent() (*FuncArg, error) {
+	// 保存当前状态
+	savedCurr := p.curr
+	savedPeek := p.peek
+	savedLexerPos := p.lexer.pos
+
+	// 尝试解析为逻辑表达式
+	expr, err := p.parseLogicalExpr()
+	if err == nil {
+		return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+	}
+
+	// 失败，恢复状态并尝试过滤器查询
+	p.curr = savedCurr
+	p.peek = savedPeek
+	p.lexer.pos = savedLexerPos
+
+	query, err := p.parseFilterQuery()
+	if err != nil {
+		return nil, err
+	}
+	return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
 }
 
 // parseInteger 解析整数字符串
