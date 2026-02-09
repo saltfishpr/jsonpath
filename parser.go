@@ -740,8 +740,8 @@ func (p *Parser) parseFilterQuery() (*FilterQuery, error) {
 // parseFunctionExpr 解析函数表达式
 // function-expr = function-name "(" S [function-argument *(S "," S function-argument)] S ")"
 func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
-	if p.curr.Type != TokenIdent {
-		return nil, fmt.Errorf("expected function name, got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenIdent); err != nil {
+		return nil, err
 	}
 
 	name := p.curr.Value
@@ -750,8 +750,8 @@ func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
 	}
 	p.advance()
 
-	if p.curr.Type != TokenLParen {
-		return nil, fmt.Errorf("expected '(' after function name, got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenLParen); err != nil {
+		return nil, err
 	}
 	p.advance()
 
@@ -775,8 +775,8 @@ func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
 		}
 	}
 
-	if p.curr.Type != TokenRParen {
-		return nil, fmt.Errorf("expected ')' after function arguments, got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenRParen); err != nil {
+		return nil, err
 	}
 	p.advance()
 
