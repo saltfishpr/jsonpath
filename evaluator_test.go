@@ -225,3 +225,157 @@ func TestRFC9535Examples(t *testing.T) {
 		})
 	}
 }
+
+// TestEvalLengthFunction 测试 length() 函数
+func TestEvalLengthFunction(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		query   string
+		wantLen int
+	}{
+		{"数组长度等于3", `["a","b","c"]`, "$[?length(@) == 3]", 1},
+		{"数组长度大于2", `["a","b","c","d"]`, "$[?length(@) > 2]", 1},
+		{"字符串长度大于5", `["short","longer string"]`, "$[?length(@) > 5]", 1},
+		{"对象成员数等于2", `{"a":1,"b":2}`, "$[?length(@) == 2]", 1},
+		{"嵌套数组长度", `{"arr":[1,2,3]}`, "$.arr[?length(@) == 3]", 3},
+		{"空数组长度0", `[]`, "$[?length(@) == 0]", 0}, // 空数组没有元素可匹配
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(tt.json, tt.query)
+			if len(got) != tt.wantLen {
+				t.Errorf("GetMany(%q) len = %d, want %d", tt.query, len(got), tt.wantLen)
+			}
+		})
+	}
+}
+
+// TestEvalCountFunction 测试 count() 函数
+func TestEvalCountFunction(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		query   string
+		wantLen int
+	}{
+		{"计数子节点", `{"a": {"x": 1, "y": 2}}`, "$[?count(@.*) == 2]", 1},
+		{"计数大于1", `{"a": [1, 2, 3]}`, "$.a[?count(@.*) > 1]", 0}, // 数组元素不是对象
+		{"计数数组元素", `{"arr": [1, 2]}`, "$[?count(@.arr[*]) == 2]", 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(tt.json, tt.query)
+			if len(got) != tt.wantLen {
+				t.Errorf("GetMany(%q) len = %d, want %d", tt.query, len(got), tt.wantLen)
+			}
+		})
+	}
+}
+
+// TestEvalMatchFunction 测试 match() 函数
+func TestEvalMatchFunction(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		query   string
+		wantLen int
+	}{
+		{"匹配日期格式", `["2024-01-01", "2024-13-01", "not-a-date"]`, "$[?match(@, '^\\d{4}-\\d{2}-\\d{2}$')]", 2},
+		{"匹配邮箱", `["test@example.com", "invalid", "user@domain.org"]`, "$[?match(@, '^[^@]+@[^@]+$')]", 2},
+		{"匹配开头", `["apple", "application", "banana"]`, "$[?match(@, '^app')]", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(tt.json, tt.query)
+			if len(got) != tt.wantLen {
+				t.Errorf("GetMany(%q) len = %d, want %d", tt.query, len(got), tt.wantLen)
+			}
+		})
+	}
+}
+
+// TestEvalSearchFunction 测试 search() 函数
+func TestEvalSearchFunction(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		query   string
+		wantLen int
+	}{
+		{"搜索数字", `["abc123def", "abcdef", "123"]`, "$[?search(@, '\\d+')]", 2},
+		{"搜索子串", `["hello world", "hello", "world"]`, "$[?search(@, 'world')]", 2},
+		{"搜索模式", `["test@example.com", "example.org"]`, "$[?search(@, 'example')]", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(tt.json, tt.query)
+			if len(got) != tt.wantLen {
+				t.Errorf("GetMany(%q) len = %d, want %d", tt.query, len(got), tt.wantLen)
+			}
+		})
+	}
+}
+
+// TestEvalValueFunction 测试 value() 函数
+func TestEvalValueFunction(t *testing.T) {
+	tests := []struct {
+		name    string
+		json    string
+		query   string
+		wantVal string
+	}{
+		{"单节点取值", `{"a": [{"b": 1}]}`, "$[?value(@.a[0].b) == 1]", "a"},
+		{"多节点返回Nothing", `{"a": [1, 2]}`, "$[?value(@.a[*]) == 1]", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(tt.json, tt.query)
+			if tt.wantVal == "" {
+				if len(got) != 0 {
+					t.Errorf("GetMany(%q) should return empty, got %d results", tt.query, len(got))
+				}
+			} else {
+				if len(got) == 0 {
+					t.Errorf("GetMany(%q) should return results", tt.query)
+				}
+			}
+		})
+	}
+}
+
+// TestFunctionComplexQueries 测试复杂的函数查询
+func TestFunctionComplexQueries(t *testing.T) {
+	json := `{
+		"users": [
+			{"name": "Alice", "age": 30, "email": "alice@example.com"},
+			{"name": "Bob", "age": 25, "email": "bob@test.org"},
+			{"name": "Charlie", "age": 35, "email": "charlie@example.com"}
+		]
+	}`
+
+	tests := []struct {
+		name    string
+		query   string
+		wantLen int
+	}{
+		{"长度筛选", "$.users[?length(@.name) >= 4]", 2},
+		{"年龄比较", "$.users[?length(@.name) > 3 && @.age > 30]", 1},
+		{"邮箱匹配", "$.users[?match(@.email, '^[^@]+@example\\\\.com$')]", 2},
+		{"邮箱搜索", "$.users[?search(@.email, 'example')]", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetMany(json, tt.query)
+			if len(got) != tt.wantLen {
+				t.Errorf("GetMany(%q) len = %d, want %d\nResults: %v", tt.query, len(got), tt.wantLen, got)
+			}
+		})
+	}
+}

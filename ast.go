@@ -165,15 +165,6 @@ type FuncCall struct {
 	Args []*FuncArg
 }
 
-// FuncArg represents a function argument
-type FuncArg struct {
-	Type        FuncArgType
-	Literal     *LiteralValue
-	FilterQuery *FilterQuery
-	LogicalExpr *FilterExpr
-	FuncExpr    *FuncCall
-}
-
 // FuncArgType identifies the type of function argument
 type FuncArgType int
 
@@ -183,3 +174,12 @@ const (
 	FuncArgLogicalExpr
 	FuncArgFuncExpr
 )
+
+// FuncArg represents a function argument
+type FuncArg struct {
+	Type        FuncArgType
+	Literal     *LiteralValue
+	FilterQuery *FilterQuery
+	LogicalExpr *FilterExpr
+	FuncExpr    *FuncCall
+}

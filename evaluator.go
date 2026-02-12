@@ -335,8 +335,8 @@ func (e *Evaluator) evalComparable(currentNode Result, c *Comparable) Result {
 	case ComparableSingularQuery:
 		return e.evalSingularQuery(currentNode, c.SingularQuery)
 	case ComparableFuncExpr:
-		// TODO: 函数表达式
-		return Result{}
+		result, _ := e.evalFuncCall(currentNode, c.FuncExpr, ContextComparable)
+		return result
 	}
 	return Result{}
 }
@@ -401,8 +401,14 @@ func (e *Evaluator) evalTestExpr(currentNode Result, test *TestExpr) bool {
 		return e.evalFilterQueryTest(currentNode, test.FilterQuery)
 	}
 	if test.FuncExpr != nil {
-		// TODO: 函数表达式测试
-		return false
+		result, ok := e.evalFuncCall(currentNode, test.FuncExpr, ContextTest)
+		if !ok {
+			return false
+		}
+		// LogicalType 或 NodesType 结果转换为逻辑值
+		// LogicalType: 存在即为 true
+		// NodesType: 非空即为 true
+		return e.funcResultToLogical(result)
 	}
 	return false
 }
@@ -472,4 +478,23 @@ func (e *Evaluator) compareLess(a, b Result) bool {
 		return a.Str < b.Str
 	}
 	return false
+}
+
+// funcResultToLogical 将函数结果转换为逻辑值
+// 用于测试表达式中的函数调用结果
+func (e *Evaluator) funcResultToLogical(result Result) bool {
+	// 如果是 Nothing（不存在），返回 false
+	if !result.Exists() {
+		return false
+	}
+	// 对于 LogicalType 结果（JSONTypeTrue 或 JSONTypeFalse）
+	// true 表示 LogicalTrue，false 表示 LogicalFalse
+	if result.Type == JSONTypeTrue {
+		return true
+	}
+	if result.Type == JSONTypeFalse {
+		return false
+	}
+	// 对于其他类型（NodesType），存在即为 LogicalTrue
+	return true
 }
