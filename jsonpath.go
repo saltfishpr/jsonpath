@@ -140,12 +140,30 @@ func (r Result) String() string {
 
 // Int returns the int64 representation
 func (r Result) Int() int64 {
-	panic("TODO")
+	switch r.Type {
+	case JSONTypeTrue:
+		return 1
+	case JSONTypeNumber:
+		return int64(r.Num)
+	case JSONTypeString:
+		n, _ := strconv.ParseInt(r.Str, 10, 64)
+		return n
+	}
+	return 0
 }
 
 // Uint returns the uint64 representation
 func (r Result) Uint() uint64 {
-	panic("TODO")
+	switch r.Type {
+	case JSONTypeTrue:
+		return 1
+	case JSONTypeNumber:
+		return uint64(r.Num)
+	case JSONTypeString:
+		n, _ := strconv.ParseUint(r.Str, 10, 64)
+		return n
+	}
+	return 0
 }
 
 // Float returns the float64 representation

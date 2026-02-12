@@ -98,10 +98,10 @@ const (
 
 // Comparable is one side of a comparison.
 type Comparable struct {
-	Type           ComparableType
-	Literal        *LiteralValue
-	SingularQuery  *SingularQuery
-	FuncExpr       *FuncCall
+	Type          ComparableType
+	Literal       *LiteralValue
+	SingularQuery *SingularQuery
+	FuncExpr      *FuncCall
 }
 
 type LiteralType int
