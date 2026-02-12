@@ -358,50 +358,32 @@ func (p *Parser) parseLogicalAndExpr() (*FilterExpr, error) {
 // parseBasicExpr 解析基本表达式
 // basic-expr = paren-expr / comparison-expr / test-expr
 func (p *Parser) parseBasicExpr() (*FilterExpr, error) {
-	if p.isLogicalExprEnd() {
-		return nil, fmt.Errorf("unexpected end of filter expression at position %d", p.curr.Pos)
-	}
-
 	// paren-expr: [logical-not-op S] "(" S logical-expr S ")"
-	// 检查是否是括号表达式：! ( 或 (
-	if p.curr.Type == TokenLParen {
-		return p.parseParenExpr()
-	}
+	// test-expr: [logical-not-op S] (filter-query / function-expr)
 
+	// 以 ! 开头，需要区分是 paren-expr 还是 test-expr
 	if p.curr.Type == TokenLNot {
-		// ! 后面如果是 (，则是 paren-expr
-		// 否则是带 logical-not 的 test-expr
+		// 检查下一个 token 是否是 (
 		if p.peek.Type == TokenLParen {
+			// paren-expr（带 NOT）
 			return p.parseParenExpr()
 		}
-		// !@ 或 !$ 或 !func(...) -> test-expr with negation
-		p.advance() // 消费 "!"
-		// 解析 test-expr 部分
+		// test-expr（带 NOT）
+		p.advance() // 消费 !
 		test, err := p.parseTestExpr()
 		if err != nil {
 			return nil, err
 		}
-		// 返回 FilterLogicalNot，其中 Operand 是 FilterTest
-		return &FilterExpr{
-			Type: FilterLogicalNot,
-			Operand: &FilterExpr{
-				Type: FilterTest,
-				Test: test,
-			},
-		}, nil
+		return &FilterExpr{Type: FilterLogicalNot, Operand: &FilterExpr{Type: FilterTest, Test: test}}, nil
 	}
 
-	// 区分 comparison-expr 和 test-expr
-	// 使用回溯策略：先尝试比较表达式，失败则尝试测试表达式
-	return p.parseBasicExprWithFallback()
-}
+	// 以 ( 开头，是 paren-expr
+	if p.curr.Type == TokenLParen {
+		return p.parseParenExpr()
+	}
 
-// isLogicalExprEnd 检查是否到达逻辑表达式结束位置
-func (p *Parser) isLogicalExprEnd() bool {
-	return p.curr.Type == TokenRBracket ||
-		p.curr.Type == TokenRParen ||
-		p.curr.Type == TokenComma ||
-		p.curr.Type == TokenEOF
+	// 其他情况：先尝试 comparison-expr，失败则尝试 test-expr
+	return p.parseBasicExprWithFallback()
 }
 
 // parseBasicExprWithFallback 先尝试比较表达式，失败后尝试测试表达式
@@ -832,29 +814,50 @@ func (p *Parser) parseFuncArg() (*FuncArg, error) {
 }
 
 // parseFuncArgRootOrCurrent 解析以 $ 或 @ 开头的函数参数
-// 先尝试逻辑表达式，失败则尝试过滤器查询
+// 优先过滤器查询，除非后面紧跟运算符（逻辑运算符或比较运算符）
 func (p *Parser) parseFuncArgRootOrCurrent() (*FuncArg, error) {
 	// 保存当前状态
 	savedCurr := p.curr
 	savedPeek := p.peek
 	savedLexerPos := p.lexer.pos
 
-	// 尝试解析为逻辑表达式
-	expr, err := p.parseLogicalExpr()
+	// 先尝试解析过滤器查询
+	query, err := p.parseFilterQuery()
 	if err == nil {
-		return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+		// 如果下一个 token 是逻辑运算符或比较运算符，则应该解析为逻辑表达式
+		if p.isOperator(p.curr.Type) {
+			// 恢复状态，重新解析为逻辑表达式
+			p.curr = savedCurr
+			p.peek = savedPeek
+			p.lexer.pos = savedLexerPos
+
+			expr, err := p.parseLogicalExpr()
+			if err != nil {
+				return nil, err
+			}
+			return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+		}
+		return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
 	}
 
-	// 失败，恢复状态并尝试过滤器查询
+	// 失败，恢复状态并尝试逻辑表达式
 	p.curr = savedCurr
 	p.peek = savedPeek
 	p.lexer.pos = savedLexerPos
 
-	query, err := p.parseFilterQuery()
+	expr, err := p.parseLogicalExpr()
 	if err != nil {
 		return nil, err
 	}
-	return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
+	return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+}
+
+// isOperator 检查是否是运算符（逻辑运算符或比较运算符）
+func (p *Parser) isOperator(t TokenType) bool {
+	return t == TokenLOr || t == TokenLAnd ||
+		t == TokenEq || t == TokenNe ||
+		t == TokenLt || t == TokenLe ||
+		t == TokenGt || t == TokenGe
 }
 
 // parseInteger 解析整数字符串

@@ -1078,6 +1078,64 @@ func TestFunctionExpression(t *testing.T) {
 			name:    "length 函数",
 			input:   "$[?length(@.items) >= 3]",
 			wantErr: false,
+			check: func(t *testing.T, q *Query) {
+				sel := q.Segments[0].Selectors[0]
+				if sel.Type != FilterSelector {
+					t.Errorf("expected FilterSelector, got %v", sel.Type)
+				}
+				if sel.Filter.Type != FilterComparison {
+					t.Errorf("expected FilterComparison, got %v", sel.Filter.Type)
+				}
+				comp := sel.Filter.Comp
+				if comp.Op != CompGe {
+					t.Errorf("expected CompGe, got %v", comp.Op)
+				}
+				if comp.Left.Type != ComparableFuncExpr {
+					t.Errorf("expected left to be ComparableFuncExpr, got %v", comp.Left.Type)
+				}
+				fn := comp.Left.FuncExpr
+				if fn.Name != "length" {
+					t.Errorf("expected function name 'length', got '%s'", fn.Name)
+				}
+				if len(fn.Args) != 1 {
+					t.Errorf("expected 1 argument, got %d", len(fn.Args))
+				}
+				{
+					fnArg := fn.Args[0]
+					if fnArg.Type != FuncArgFilterQuery {
+						t.Errorf("expected FuncArgFilterQuery, got %v", fnArg.Type)
+					}
+					fq := fnArg.FilterQuery
+					if !fq.Relative {
+						t.Error("expected relative query (starting with @)")
+					}
+					if len(fq.Segments) != 1 {
+						t.Errorf("expected 1 segment in filter query, got %d", len(fq.Segments))
+					}
+					seg := fq.Segments[0]
+					if len(seg.Selectors) != 1 {
+						t.Errorf("expected 1 selector, got %d", len(seg.Selectors))
+					}
+					sel := seg.Selectors[0]
+					if sel.Type != NameSelector {
+						t.Errorf("expected NameSelector, got %v", sel.Type)
+					}
+
+					if sel.Name != "items" {
+						t.Errorf("expected name 'items', got '%s'", sel.Name)
+					}
+				}
+				if comp.Right.Type != ComparableLiteral {
+					t.Errorf("expected right to be ComparableLiteral, got %v", comp.Right.Type)
+				}
+				lit := comp.Right.Literal
+				if lit.Type != LiteralNumber {
+					t.Errorf("expected LiteralNumber, got %v", lit.Type)
+				}
+				if lit.Value != "3" {
+					t.Errorf("expected value '3', got '%s'", lit.Value)
+				}
+			},
 		},
 		{
 			name:    "count 函数",
