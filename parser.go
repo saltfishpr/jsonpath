@@ -394,8 +394,8 @@ func (p *Parser) parseParenExpr() (*FilterExpr, error) {
 		p.advance()
 	}
 
-	if p.curr.Type != TokenLParen {
-		return nil, fmt.Errorf("expected '(' after '!', got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenLParen); err != nil {
+		return nil, err
 	}
 	p.advance()
 
@@ -404,22 +404,24 @@ func (p *Parser) parseParenExpr() (*FilterExpr, error) {
 		return nil, err
 	}
 
-	if p.curr.Type != TokenRParen {
-		return nil, fmt.Errorf("expected ')' after filter expression, got %s(%q)", p.curr.Type, p.curr.Value)
+	if err := p.expectToken(TokenRParen); err != nil {
+		return nil, err
 	}
 	p.advance()
 
-	if hasNot {
-		return &FilterExpr{
-			Type:    FilterLogicalNot,
-			Operand: expr,
-		}, nil
-	}
-
-	return &FilterExpr{
+	expr = &FilterExpr{
 		Type:    FilterParen,
 		Operand: expr,
-	}, nil
+	}
+
+	if hasNot {
+		expr = &FilterExpr{
+			Type:    FilterLogicalNot,
+			Operand: expr,
+		}
+	}
+
+	return expr, nil
 }
 
 // parseComparisonExpr parses comparison expressions
@@ -628,19 +630,11 @@ func (p *Parser) parseTestExpr() (*TestExpr, error) {
 		return test, nil
 
 	case TokenIdent:
-		if p.peek.Type == TokenLParen {
-			fn, err := p.parseFunctionExpr()
-			if err != nil {
-				return nil, err
-			}
-			test.FuncExpr = fn
-			return test, nil
-		}
-		query, err := p.parseFilterQuery()
+		fn, err := p.parseFunctionExpr()
 		if err != nil {
 			return nil, err
 		}
-		test.FilterQuery = query
+		test.FuncExpr = fn
 		return test, nil
 
 	default:
@@ -743,67 +737,85 @@ func (p *Parser) parseFuncArg() (*FuncArg, error) {
 		return &FuncArg{Type: FuncArgLiteral, Literal: lit}, nil
 
 	case TokenRoot, TokenCurrent:
-		// Use backtracking: try logical-expr first, fall back to filter-query
 		return p.parseFuncArgRootOrCurrent()
 
-	case TokenLNot, TokenLParen, TokenIdent:
-		if p.curr.Type == TokenIdent && p.peek.Type == TokenLParen {
-			fn, err := p.parseFunctionExpr()
-			if err != nil {
-				return nil, err
-			}
-			return &FuncArg{Type: FuncArgFuncExpr, FuncExpr: fn}, nil
-		}
-		expr, err := p.parseLogicalExpr()
+	case TokenIdent:
+		fn, err := p.parseFunctionExpr()
 		if err != nil {
 			return nil, err
 		}
-		return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
+		return &FuncArg{Type: FuncArgFuncExpr, FuncExpr: fn}, nil
 
 	default:
 		return nil, fmt.Errorf("unexpected token %s(%q) in function argument", p.curr.Type, p.curr.Value)
 	}
 }
 
-// parseFuncArgRootOrCurrent parses function args starting with $ or @
-// Prefers filter-query unless followed by an operator
 func (p *Parser) parseFuncArgRootOrCurrent() (*FuncArg, error) {
 	savedCurr := p.curr
 	savedPeek := p.peek
 	savedLexerPos := p.lexer.pos
 
 	query, err := p.parseFilterQuery()
-	if err == nil {
-		if p.isOperator(p.curr.Type) {
-			p.curr = savedCurr
-			p.peek = savedPeek
-			p.lexer.pos = savedLexerPos
-
-			expr, err := p.parseLogicalExpr()
-			if err != nil {
-				return nil, err
-			}
-			return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
-		}
-		return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
-	}
-
-	p.curr = savedCurr
-	p.peek = savedPeek
-	p.lexer.pos = savedLexerPos
-
-	expr, err := p.parseLogicalExpr()
 	if err != nil {
 		return nil, err
 	}
-	return &FuncArg{Type: FuncArgLogicalExpr, LogicalExpr: expr}, nil
-}
 
-func (p *Parser) isOperator(t TokenType) bool {
-	return t == TokenLOr || t == TokenLAnd ||
-		t == TokenEq || t == TokenNe ||
-		t == TokenLt || t == TokenLe ||
-		t == TokenGt || t == TokenGe
+	switch p.curr.Type {
+	case TokenLAnd:
+		p.advance()
+		right, err := p.parseLogicalExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &FuncArg{
+			LogicalExpr: &FilterExpr{
+				Type: FilterLogicalAnd,
+				Left: &FilterExpr{
+					Test: &TestExpr{
+						FilterQuery: query,
+					},
+				},
+				Right: right,
+			},
+		}, nil
+
+	case TokenLOr:
+		p.advance()
+		right, err := p.parseLogicalExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &FuncArg{
+			LogicalExpr: &FilterExpr{
+				Type: FilterLogicalOr,
+				Left: &FilterExpr{
+					Test: &TestExpr{
+						FilterQuery: query,
+					},
+				},
+				Right: right,
+			},
+		}, nil
+
+	case TokenEq, TokenNe, TokenLt, TokenLe, TokenGt, TokenGe:
+		// reparse comparison
+		p.curr = savedCurr
+		p.peek = savedPeek
+		p.lexer.pos = savedLexerPos
+		comp, err := p.parseComparisonExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &FuncArg{
+			LogicalExpr: &FilterExpr{
+				Type: FilterComparison,
+				Comp: comp,
+			},
+		}, nil
+
+	}
+	return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
 }
 
 func parseInteger(s string) (int, error) {
