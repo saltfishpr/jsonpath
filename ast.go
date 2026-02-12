@@ -114,7 +114,7 @@ const (
 	LiteralNull
 )
 
-// LiteralValue 字面量
+// LiteralValue represents a literal value in expressions
 type LiteralValue struct {
 	Type  LiteralType
 	Value string

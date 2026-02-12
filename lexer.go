@@ -8,55 +8,55 @@ import (
 	"unicode/utf8"
 )
 
-// TokenType 表示 token 的类型
+// TokenType is the type of a token
 type TokenType int
 
-// Token 类型常量
+// Token type constants
 const (
 	TokenIllegal TokenType = iota
 	TokenEOF
 
-	// 标识符
-	TokenRoot    // $  - 根节点标识符
-	TokenCurrent // @  - 当前节点标识符
+	// Identifiers
+	TokenRoot    // $  - Root node identifier
+	TokenCurrent // @  - Current node identifier
 
-	// 运算符
-	TokenDot      // .  - 点号（子段简写）
-	TokenDotDot   // .. - 双点号（后代段）
-	TokenLBracket // [  - 左方括号
-	TokenRBracket // ]  - 右方括号
-	TokenComma    // ,  - 逗号
-	TokenQuestion // ?  - 问号（过滤器）
-	TokenColon    // :  - 冒号（切片）
-	TokenWildcard // * - 通配符
+	// Operators
+	TokenDot      // .  - Dot (child segment shorthand)
+	TokenDotDot   // .. - Double dot (descendant segment)
+	TokenLBracket // [  - Left bracket
+	TokenRBracket // ]  - Right bracket
+	TokenComma    // ,  - Comma
+	TokenQuestion // ?  - Question mark (filter)
+	TokenColon    // :  - Colon (slice)
+	TokenWildcard // * - Wildcard
 
-	// 比较运算符
-	TokenEq // ==  - 等于
-	TokenNe // !=  - 不等于
-	TokenLt // <   - 小于
-	TokenLe // <=  - 小于等于
-	TokenGt // >   - 大于
-	TokenGe // >=  - 大于等于
+	// Comparison operators
+	TokenEq // ==  - Equal
+	TokenNe // !=  - Not equal
+	TokenLt // <   - Less than
+	TokenLe // <=  - Less than or equal
+	TokenGt // >   - Greater than
+	TokenGe // >=  - Greater than or equal
 
-	// 逻辑运算符
-	TokenLAnd // &&  - 逻辑与
-	TokenLOr  // ||  - 逻辑或
-	TokenLNot // !   - 逻辑非
+	// Logical operators
+	TokenLAnd // &&  - Logical and
+	TokenLOr  // ||  - Logical or
+	TokenLNot // !   - Logical not
 
-	// 括号
-	TokenLParen // ( - 左圆括号
-	TokenRParen // ) - 右圆括号
+	// Parentheses
+	TokenLParen // ( - Left parenthesis
+	TokenRParen // ) - Right parenthesis
 
-	// 字面量
-	TokenIdent  // 标识符/名称/函数名
-	TokenNumber // 数字
-	TokenString // 字符串
+	// Literals
+	TokenIdent  // Identifier/name/function name
+	TokenNumber // Number
+	TokenString // String
 	TokenTrue   // true
 	TokenFalse  // false
 	TokenNull   // null
 )
 
-// String 返回 TokenType 的字符串表示
+// String returns the string representation of TokenType
 func (t TokenType) String() string {
 	switch t {
 	case TokenIllegal:
@@ -122,26 +122,26 @@ func (t TokenType) String() string {
 	}
 }
 
-// Token 表示一个词法单元
+// Token represents a lexical token
 type Token struct {
-	Type  TokenType // token 类型
-	Value string    // 原始字符串值
-	Pos   int       // 在输入中的位置
+	Type  TokenType
+	Value string
+	Pos   int
 }
 
-// Lexer 词法分析器
+// Lexer tokenizes JSONPath expressions
 type Lexer struct {
-	input string // 输入字符串
-	pos   int    // 当前读取位置
-	width int    // 最后一个 rune 的宽度
+	input string
+	pos   int
+	width int
 }
 
-// NewLexer 创建一个新的词法分析器
+// NewLexer creates a new lexer for the input string
 func NewLexer(input string) *Lexer {
 	return &Lexer{input: input}
 }
 
-// NextToken 读取并返回下一个 token
+// NextToken reads and returns the next token from the input
 func (l *Lexer) NextToken() Token {
 	l.skipWhitespace()
 
@@ -220,13 +220,12 @@ func (l *Lexer) NextToken() Token {
 		return l.readString()
 	}
 
-	// 数字：以 - 或数字开头
+	// Number literals must start with - or digit
 	if r == '-' || unicode.IsDigit(r) {
 		l.backup()
 		return l.readNumber()
 	}
 
-	// 标识符/关键字/函数名
 	if isNameFirst(r) {
 		l.backup()
 		return l.readIdent()
@@ -235,7 +234,6 @@ func (l *Lexer) NextToken() Token {
 	return Token{Type: TokenIllegal, Value: string(r), Pos: pos}
 }
 
-// skipWhitespace 跳过空白字符
 func (l *Lexer) skipWhitespace() {
 	for {
 		r := l.peek()
@@ -246,26 +244,25 @@ func (l *Lexer) skipWhitespace() {
 	}
 }
 
-// readString 读取字符串字面量（支持单引号和双引号）
 func (l *Lexer) readString() Token {
 	pos := l.pos
 	var sb strings.Builder
 
-	quote := l.next() // 获取引号字符 (' 或 ")
+	quote := l.next() // Get quote character (' or ")
 	for {
 		r := l.next()
 		if r == utf8.RuneError {
-			// 没有找到匹配的引号，返回非法 token
+			// No matching quote found, return illegal token
 			return Token{Type: TokenIllegal, Value: l.input[pos:l.pos], Pos: pos}
 		}
 
 		if r == quote {
-			// 找到匹配的引号，字符串结束
+			// Found matching quote, string ends
 			break
 		}
 
 		if r == '\\' {
-			// 处理转义序列
+			// Handle escape sequence
 			escaped := l.next()
 			if escaped == utf8.RuneError {
 				return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
@@ -294,7 +291,7 @@ func (l *Lexer) readString() Token {
 				l.pos += 4
 
 				if utf16.IsSurrogate(rune(r1)) {
-					// 处理代理对
+					// Handle surrogate pair
 					if l.pos+6 > len(l.input) || l.input[l.pos:l.pos+2] != "\\u" {
 						return Token{Type: TokenIllegal, Value: sb.String(), Pos: pos}
 					}
@@ -317,23 +314,21 @@ func (l *Lexer) readString() Token {
 	return Token{Type: TokenString, Value: sb.String(), Pos: pos}
 }
 
-// readNumber 读取数字字面量
 func (l *Lexer) readNumber() Token {
 	pos := l.pos
 
-	// 负号
 	if l.peek() == '-' {
 		l.next()
-		// 负号后必须跟数字
+		// Must be followed by digit
 		if !unicode.IsDigit(l.peek()) {
 			return Token{Type: TokenIllegal, Value: l.input[pos:l.pos], Pos: pos}
 		}
 	}
 
-	// 整数部分
+	// Integer part
 	if l.peek() == '0' {
 		l.next()
-		// 0 后面不能跟数字
+		// Leading zeros not allowed
 		if unicode.IsDigit(l.peek()) {
 			return Token{Type: TokenIllegal, Value: l.input[pos:l.pos], Pos: pos}
 		}
@@ -343,7 +338,7 @@ func (l *Lexer) readNumber() Token {
 		}
 	}
 
-	// 小数部分
+	// Fraction part
 	if l.peek() == '.' {
 		l.next()
 		hasDigit := false
@@ -356,7 +351,7 @@ func (l *Lexer) readNumber() Token {
 		}
 	}
 
-	// 指数部分
+	// Exponent part
 	if l.peek() == 'e' || l.peek() == 'E' {
 		l.next()
 		if l.peek() == '+' || l.peek() == '-' {
@@ -375,7 +370,6 @@ func (l *Lexer) readNumber() Token {
 	return Token{Type: TokenNumber, Value: l.input[pos:l.pos], Pos: pos}
 }
 
-// readIdent 读取标识符或关键字
 func (l *Lexer) readIdent() Token {
 	pos := l.pos
 

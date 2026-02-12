@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// FuncResultType 函数返回类型
+// FuncResultType is the return type of a function
 type FuncResultType int
 
 const (
@@ -15,7 +15,7 @@ const (
 	ResultTypeNodesType
 )
 
-// FuncParamType 函数参数类型
+// FuncParamType is the parameter type of a function
 type FuncParamType int
 
 const (
@@ -24,23 +24,23 @@ const (
 	ParamTypeNodesType
 )
 
-// FuncSignature 函数签名
+// FuncSignature defines a function's signature
 type FuncSignature struct {
 	Name       string
 	ParamTypes []FuncParamType
 	ReturnType FuncResultType
 }
 
-// FuncContext 函数调用上下文
+// FuncContext is the context where a function is called
 type FuncContext int
 
 const (
-	ContextComparable FuncContext = iota // 作为比较表达式的一部分
-	ContextTest                          // 作为测试表达式
-	ContextArgument                      // 作为函数参数
+	ContextComparable FuncContext = iota // As part of comparison expression
+	ContextTest                          // As test expression
+	ContextArgument                      // As function argument
 )
 
-// 内置函数签名表
+// builtinSignatures contains signatures for built-in functions
 var builtinSignatures = map[string]*FuncSignature{
 	"length": {Name: "length", ParamTypes: []FuncParamType{ParamTypeValueType}, ReturnType: ResultTypeValueType},
 	"count":  {Name: "count", ParamTypes: []FuncParamType{ParamTypeNodesType}, ReturnType: ResultTypeValueType},
@@ -49,19 +49,19 @@ var builtinSignatures = map[string]*FuncSignature{
 	"value":  {Name: "value", ParamTypes: []FuncParamType{ParamTypeNodesType}, ReturnType: ResultTypeValueType},
 }
 
-// 自定义函数注册表
+// Custom function registries
 var (
 	customSignatures = make(map[string]*FuncSignature)
 	customHandlers   = make(map[string]FunctionHandler)
 	registryMutex    sync.RWMutex
 )
 
-// FunctionHandler 函数处理器类型
-// 参数: evaluator, 参数值列表, 函数签名
-// 返回: 结果值, 是否成功
+// FunctionHandler implements a custom function
+// Parameters: evaluator, argument values, function signature
+// Returns: result value, success flag
 type FunctionHandler func(*Evaluator, []evalFuncResult, *FuncSignature) (Result, bool)
 
-// RegisterFunction 注册自定义函数签名
+// RegisterFunction registers a custom function signature
 func RegisterFunction(name string, paramTypes []FuncParamType, returnType FuncResultType) {
 	registryMutex.Lock()
 	defer registryMutex.Unlock()
@@ -73,7 +73,7 @@ func RegisterFunction(name string, paramTypes []FuncParamType, returnType FuncRe
 	}
 }
 
-// RegisterFunctionHandler 注册自定义函数处理器
+// RegisterFunctionHandler registers a custom function handler
 func RegisterFunctionHandler(name string, handler FunctionHandler) {
 	registryMutex.Lock()
 	defer registryMutex.Unlock()
@@ -81,7 +81,7 @@ func RegisterFunctionHandler(name string, handler FunctionHandler) {
 	customHandlers[name] = handler
 }
 
-// UnregisterFunction 注销自定义函数
+// UnregisterFunction unregisters a custom function
 func UnregisterFunction(name string) {
 	registryMutex.Lock()
 	defer registryMutex.Unlock()
@@ -90,7 +90,7 @@ func UnregisterFunction(name string) {
 	delete(customHandlers, name)
 }
 
-// logicalResult 将逻辑值转换为 Result（用于表示 LogicalTrue/LogicalFalse）
+// logicalResult converts a bool to Result (LogicalTrue/LogicalFalse)
 func (e *Evaluator) logicalResult(value bool) Result {
 	if value {
 		return Result{Type: JSONTypeTrue, Raw: "true"}
@@ -98,26 +98,24 @@ func (e *Evaluator) logicalResult(value bool) Result {
 	return Result{Type: JSONTypeFalse, Raw: "false"}
 }
 
-// evalFuncResult 函数求值结果
+// evalFuncResult holds the result of evaluating a function argument
 type evalFuncResult struct {
-	value      Result   // ValueType 结果
-	logical    bool     // LogicalType 结果
-	nodes      []Result // NodesType 结果
+	value      Result   // ValueType result
+	logical    bool     // LogicalType result
+	nodes      []Result // NodesType result
 	resultType FuncResultType
-	isNothing  bool // 标记是否为 Nothing
+	isNothing  bool // Whether result is Nothing
 }
 
-// findFunctionSignature 查找函数签名
+// findFunctionSignature finds a function's signature (builtin or custom)
 func (e *Evaluator) findFunctionSignature(name string) *FuncSignature {
 	registryMutex.RLock()
 	defer registryMutex.RUnlock()
 
-	// 先查内置函数
 	if sig, ok := builtinSignatures[name]; ok {
 		return sig
 	}
 
-	// 再查自定义函数
 	if sig, ok := customSignatures[name]; ok {
 		return sig
 	}
@@ -125,33 +123,30 @@ func (e *Evaluator) findFunctionSignature(name string) *FuncSignature {
 	return nil
 }
 
-// checkFunctionWellTyped 检查函数是否类型正确
+// checkFunctionWellTyped checks if function call matches signature
 func (e *Evaluator) checkFunctionWellTyped(fn *FuncCall, sig *FuncSignature, context FuncContext) bool {
-	// 检查参数数量
 	if len(fn.Args) != len(sig.ParamTypes) {
 		return false
 	}
 
-	// 根据上下文检查返回类型
 	switch context {
 	case ContextTest:
-		// 作为 test-expr: 返回类型必须是 LogicalType 或 NodesType
+		// As test-expr: return must be LogicalType or NodesType
 		if sig.ReturnType != ResultTypeLogicalType && sig.ReturnType != ResultTypeNodesType {
 			return false
 		}
 	case ContextComparable:
-		// 作为 comparable: 返回类型必须是 ValueType
+		// As comparable: return must be ValueType
 		if sig.ReturnType != ResultTypeValueType {
 			return false
 		}
 	case ContextArgument:
-		// 作为参数: 由调用方检查，这里不做限制
+		// As argument: checked by caller
 	}
 
 	return true
 }
 
-// evalFuncArgs 评估函数参数
 func (e *Evaluator) evalFuncArgs(currentNode Result, fn *FuncCall, sig *FuncSignature) ([]evalFuncResult, bool) {
 	args := make([]evalFuncResult, len(fn.Args))
 
@@ -166,7 +161,6 @@ func (e *Evaluator) evalFuncArgs(currentNode Result, fn *FuncCall, sig *FuncSign
 	return args, true
 }
 
-// evalFuncArg 评估单个函数参数
 func (e *Evaluator) evalFuncArg(currentNode Result, arg *FuncArg, expectedType FuncParamType) (evalFuncResult, bool) {
 	switch arg.Type {
 	case FuncArgLiteral:
@@ -181,7 +175,6 @@ func (e *Evaluator) evalFuncArg(currentNode Result, arg *FuncArg, expectedType F
 	return evalFuncResult{}, false
 }
 
-// evalLiteralArg 评估字面量参数
 func (e *Evaluator) evalLiteralArg(lit *LiteralValue, expectedType FuncParamType) (evalFuncResult, bool) {
 	switch expectedType {
 	case ParamTypeValueType:
@@ -191,16 +184,13 @@ func (e *Evaluator) evalLiteralArg(lit *LiteralValue, expectedType FuncParamType
 			isNothing:  false,
 		}, true
 	case ParamTypeLogicalType:
-		// 字面量不能作为 LogicalType 参数
 		return evalFuncResult{}, false
 	case ParamTypeNodesType:
-		// 字面量不能作为 NodesType 参数
 		return evalFuncResult{}, false
 	}
 	return evalFuncResult{}, false
 }
 
-// evalFilterQueryArg 评估查询参数
 func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expectedType FuncParamType) (evalFuncResult, bool) {
 	results := e.evalFilterQuery(currentNode, fq)
 
@@ -216,7 +206,7 @@ func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expe
 				isNothing:  false,
 			}, true
 		}
-		// 多个节点，返回 Nothing（RFC 9535 规定）
+		// Multiple nodes return Nothing (RFC 9535)
 		return evalFuncResult{isNothing: true, resultType: ResultTypeValueType}, true
 	case ParamTypeNodesType:
 		return evalFuncResult{
@@ -235,9 +225,7 @@ func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expe
 	return evalFuncResult{}, false
 }
 
-// evalLogicalExprArg 评估逻辑表达式参数
 func (e *Evaluator) evalLogicalExprArg(currentNode Result, expr *FilterExpr, expectedType FuncParamType) (evalFuncResult, bool) {
-	// 逻辑表达式只能作为 LogicalType 参数
 	if expectedType != ParamTypeLogicalType {
 		return evalFuncResult{}, false
 	}
@@ -250,14 +238,12 @@ func (e *Evaluator) evalLogicalExprArg(currentNode Result, expr *FilterExpr, exp
 	}, true
 }
 
-// evalFuncExprArg 评估嵌套函数表达式参数
 func (e *Evaluator) evalFuncExprArg(currentNode Result, fn *FuncCall, expectedType FuncParamType) (evalFuncResult, bool) {
 	result, ok := e.evalFuncCall(currentNode, fn, ContextArgument)
 	if !ok {
 		return evalFuncResult{}, false
 	}
 
-	// 根据嵌套函数的返回类型和期望类型进行转换
 	sig := e.findFunctionSignature(fn.Name)
 	if sig == nil {
 		return evalFuncResult{}, false
@@ -283,12 +269,8 @@ func (e *Evaluator) evalFuncExprArg(currentNode Result, fn *FuncCall, expectedTy
 		}
 	case ResultTypeNodesType:
 		if expectedType == ParamTypeNodesType {
-			// NodesType 结果需要特殊处理
-			// 但这里我们只有一个 Result，无法表示 nodelist
-			// 这种情况应该由调用方处理
 			return evalFuncResult{}, false
 		}
-		// NodesType 可以隐式转换为 LogicalType
 		if expectedType == ParamTypeLogicalType {
 			logical := result.Exists()
 			return evalFuncResult{
@@ -302,41 +284,35 @@ func (e *Evaluator) evalFuncExprArg(currentNode Result, fn *FuncCall, expectedTy
 	return evalFuncResult{}, false
 }
 
-// evalFuncCall 评估函数调用
+// evalFuncCall evaluates a function call
 func (e *Evaluator) evalFuncCall(currentNode Result, fn *FuncCall, context FuncContext) (Result, bool) {
-	// 1. 查找函数签名
 	sig := e.findFunctionSignature(fn.Name)
 	if sig == nil {
 		return Result{}, false
 	}
 
-	// 2. 类型检查
 	if !e.checkFunctionWellTyped(fn, sig, context) {
 		return Result{}, false
 	}
 
-	// 3. 评估参数
 	args, ok := e.evalFuncArgs(currentNode, fn, sig)
 	if !ok {
 		return Result{}, false
 	}
 
-	// 4. 调用函数实现
 	return e.callFunction(fn.Name, args, sig)
 }
 
-// callFunction 调用函数实现
+// callFunction calls a function implementation
 func (e *Evaluator) callFunction(name string, args []evalFuncResult, sig *FuncSignature) (Result, bool) {
 	registryMutex.RLock()
 	handler, hasCustom := customHandlers[name]
 	registryMutex.RUnlock()
 
-	// 优先使用自定义处理器
 	if hasCustom {
 		return handler(e, args, sig)
 	}
 
-	// 使用内置函数实现
 	switch name {
 	case "length":
 		return e.builtinLength(args)
@@ -353,14 +329,13 @@ func (e *Evaluator) callFunction(name string, args []evalFuncResult, sig *FuncSi
 	return Result{}, false
 }
 
-// builtinLength 实现 length() 函数
+// builtinLength implements the length() function
 func (e *Evaluator) builtinLength(args []evalFuncResult) (Result, bool) {
 	if len(args) != 1 {
 		return Result{}, false
 	}
 	arg := args[0]
 
-	// 如果是 Nothing，返回 Nothing
 	if arg.isNothing {
 		return Result{}, true
 	}
@@ -380,7 +355,6 @@ func (e *Evaluator) builtinLength(args []evalFuncResult) (Result, bool) {
 	case v.Type == JSONTypeString:
 		length = len(v.Str)
 	default:
-		// 其他类型返回 Nothing
 		return Result{}, true
 	}
 
@@ -391,7 +365,7 @@ func (e *Evaluator) builtinLength(args []evalFuncResult) (Result, bool) {
 	}, true
 }
 
-// builtinCount 实现 count() 函数
+// builtinCount implements the count() function
 func (e *Evaluator) builtinCount(args []evalFuncResult) (Result, bool) {
 	if len(args) != 1 {
 		return Result{}, false
@@ -410,7 +384,7 @@ func (e *Evaluator) builtinCount(args []evalFuncResult) (Result, bool) {
 	}, true
 }
 
-// builtinMatch 实现 match() 函数
+// builtinMatch implements the match() function
 func (e *Evaluator) builtinMatch(args []evalFuncResult) (Result, bool) {
 	input, pattern, ok := e.checkTwoStringArgs(args)
 	if !ok {
@@ -426,7 +400,7 @@ func (e *Evaluator) builtinMatch(args []evalFuncResult) (Result, bool) {
 	return e.logicalResult(matched), true
 }
 
-// checkTwoStringArgs 检查两个参数是否都是字符串
+// checkTwoStringArgs verifies both args are strings
 func (e *Evaluator) checkTwoStringArgs(args []evalFuncResult) (string, string, bool) {
 	if len(args) != 2 {
 		return "", "", false
@@ -445,7 +419,7 @@ func (e *Evaluator) checkTwoStringArgs(args []evalFuncResult) (string, string, b
 	return input.value.Str, pattern.value.Str, true
 }
 
-// builtinSearch 实现 search() 函数
+// builtinSearch implements the search() function
 func (e *Evaluator) builtinSearch(args []evalFuncResult) (Result, bool) {
 	input, pattern, ok := e.checkTwoStringArgs(args)
 	if !ok {
@@ -461,7 +435,7 @@ func (e *Evaluator) builtinSearch(args []evalFuncResult) (Result, bool) {
 	return e.logicalResult(matched), true
 }
 
-// builtinValue 实现 value() 函数
+// builtinValue implements the value() function
 func (e *Evaluator) builtinValue(args []evalFuncResult) (Result, bool) {
 	if len(args) != 1 {
 		return Result{}, false
@@ -472,9 +446,8 @@ func (e *Evaluator) builtinValue(args []evalFuncResult) (Result, bool) {
 		return Result{}, false
 	}
 
-	// 单节点返回值，空/多节点返回 Nothing
 	if len(arg.nodes) == 1 {
 		return arg.nodes[0], true
 	}
-	return Result{}, true // Nothing
+	return Result{}, true
 }

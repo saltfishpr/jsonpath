@@ -6,18 +6,17 @@ import (
 	"unicode/utf8"
 )
 
-// I-JSON 安全整数范围
+// I-JSON safe integer range
 const (
 	MinSafeInteger = -(2<<52 - 1)
 	MaxSafeInteger = 2<<52 - 1
 )
 
-// parseValue parses the json and returns a result.
+// parseValue parses JSON and returns a Result.
 //
-// This function expects that the json is well-formed, and does not validate.
-// Invalid json will not panic, but it may return back unexpected results.
-// If you are consuming JSON from an unpredictable source then you may want to
-// use the Valid function first.
+// This function expects well-formed JSON and does not validate.
+// Invalid JSON will not panic but may return unexpected results.
+// For unpredictable sources, consider using the Valid function first.
 func parseValue(json string) Result {
 	var value Result
 	i := 0
@@ -141,7 +140,6 @@ func tostr(json string) (raw string, str string) {
 	return json, json[1:]
 }
 
-// unescape unescapes a string
 func unescape(json string) string {
 	str := make([]byte, 0, len(json))
 	for i := 0; i < len(json); i++ {
@@ -219,7 +217,7 @@ func skipWhitespaceJSON(json string, i int) int {
 	return i
 }
 
-// parseArrayElement 解析 JSON 数组元素，返回元素和下一个位置
+// parseArrayElement parses a JSON array element and returns element + next position
 func parseArrayElement(json string, i int) (Result, int) {
 	i = skipWhitespaceJSON(json, i)
 	if i >= len(json) {
@@ -268,19 +266,17 @@ func parseArrayElement(json string, i int) (Result, int) {
 	return Result{}, i
 }
 
-// parseObjectMember 解析 JSON 对象成员，返回 key, value 和下一个位置
+// parseObjectMember parses a JSON object member and returns key, value, next position
 func parseObjectMember(json string, i int) (string, Result, int) {
 	i = skipWhitespaceJSON(json, i)
 	if i >= len(json) || json[i] != '"' {
 		return "", Result{}, i
 	}
 
-	// 解析 key (格式: "key")
 	rawKey, keyStr := tostr(json[i:])
 	key := keyStr
 	i += len(rawKey)
 
-	// 跳过冒号和空白
 	i = skipWhitespaceJSON(json, i)
 	if i >= len(json) || json[i] != ':' {
 		return key, Result{}, i
@@ -288,12 +284,11 @@ func parseObjectMember(json string, i int) (string, Result, int) {
 	i++
 	i = skipWhitespaceJSON(json, i)
 
-	// 解析 value
 	value, nextPos := parseArrayElement(json, i)
 	return key, value, nextPos
 }
 
-// squashJSONArray 提取完整的 JSON 数组
+// squashJSONArray extracts a complete JSON array
 func squashJSONArray(json string) string {
 	depth := 0
 	for i := 0; i < len(json); i++ {
@@ -305,7 +300,6 @@ func squashJSONArray(json string) string {
 					if json[i-1] != '\\' {
 						break
 					}
-					// 检查转义斜杠
 					n := 0
 					for j := i - 2; j >= 0; j-- {
 						if json[j] != '\\' {
@@ -330,7 +324,7 @@ func squashJSONArray(json string) string {
 	return json
 }
 
-// squashJSONObject 提取完整的 JSON 对象
+// squashJSONObject extracts a complete JSON object
 func squashJSONObject(json string) string {
 	depth := 0
 	for i := 0; i < len(json); i++ {
@@ -342,7 +336,6 @@ func squashJSONObject(json string) string {
 					if json[i-1] != '\\' {
 						break
 					}
-					// 检查转义斜杠
 					n := 0
 					for j := i - 2; j >= 0; j-- {
 						if json[j] != '\\' {

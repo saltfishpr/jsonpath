@@ -4,13 +4,13 @@ import (
 	"strconv"
 )
 
-// Evaluator JSONPath 表达式求值器
+// Evaluator evaluates JSONPath expressions against JSON data
 type Evaluator struct {
 	json  string
 	query *Query
 }
 
-// NewEvaluator 创建新的求值器
+// NewEvaluator creates a new evaluator for the given JSON and query
 func NewEvaluator(json string, query *Query) *Evaluator {
 	return &Evaluator{
 		json:  json,
@@ -18,7 +18,7 @@ func NewEvaluator(json string, query *Query) *Evaluator {
 	}
 }
 
-// Evaluate 执行查询并返回结果列表
+// Evaluate executes the query and returns all matching results
 func (e *Evaluator) Evaluate() []Result {
 	root := parseValue(e.json)
 	if !root.Exists() {
@@ -41,13 +41,11 @@ func (e *Evaluator) evaluateSegment(input []Result, segment *Segment) []Result {
 	var output []Result
 
 	if segment.Type == DescendantSegment {
-		// 后代段: 递归查找所有后代节点
 		for _, result := range input {
 			descendants := e.evalDescendant(result, segment.Selectors)
 			output = append(output, descendants...)
 		}
 	} else {
-		// 子段: 只查找直接子节点
 		for _, result := range input {
 			for _, selector := range segment.Selectors {
 				selected := e.evaluateSelector(result, selector)
@@ -59,25 +57,21 @@ func (e *Evaluator) evaluateSegment(input []Result, segment *Segment) []Result {
 	return output
 }
 
-// evalDescendant 评估后代段，递归查找所有后代节点
+// evalDescendant evaluates descendant segments (recursive)
 func (e *Evaluator) evalDescendant(result Result, selectors []*Selector) []Result {
 	var results []Result
-
-	// 深度优先遍历
 	e.collectDescendants(result, selectors, &results)
 
 	return results
 }
 
-// collectDescendants 递归收集后代节点
+// collectDescendants recursively collects descendant nodes
 func (e *Evaluator) collectDescendants(result Result, selectors []*Selector, results *[]Result) {
-	// 先对当前节点应用选择器
 	for _, selector := range selectors {
 		selected := e.evaluateSelector(result, selector)
 		*results = append(*results, selected...)
 	}
 
-	// 递归处理子节点
 	if result.IsArray() {
 		for _, elem := range result.Array() {
 			e.collectDescendants(elem, selectors, results)
@@ -89,7 +83,6 @@ func (e *Evaluator) collectDescendants(result Result, selectors []*Selector, res
 	}
 }
 
-// evaluateSelector 在单个结果上评估选择器
 func (e *Evaluator) evaluateSelector(result Result, selector *Selector) []Result {
 	switch selector.Type {
 	case NameSelector:
@@ -107,7 +100,6 @@ func (e *Evaluator) evaluateSelector(result Result, selector *Selector) []Result
 	}
 }
 
-// evalNameSelector 评估名称选择器
 func (e *Evaluator) evalNameSelector(result Result, name string) []Result {
 	if !result.IsObject() {
 		return nil
@@ -119,7 +111,6 @@ func (e *Evaluator) evalNameSelector(result Result, name string) []Result {
 	return nil
 }
 
-// evalWildcardSelector 评估通配符选择器
 func (e *Evaluator) evalWildcardSelector(result Result) []Result {
 	if result.IsArray() {
 		return result.Array()
@@ -134,7 +125,6 @@ func (e *Evaluator) evalWildcardSelector(result Result) []Result {
 	return nil
 }
 
-// evalIndexSelector 评估索引选择器
 func (e *Evaluator) evalIndexSelector(result Result, index int) []Result {
 	if !result.IsArray() {
 		return nil
@@ -142,12 +132,12 @@ func (e *Evaluator) evalIndexSelector(result Result, index int) []Result {
 	arr := result.Array()
 	length := len(arr)
 
-	// 处理负索引
+	// Handle negative indices
 	if index < 0 {
 		index = length + index
 	}
 
-	// 超出范围返回空（RFC 9535 规定）
+	// Out of bounds returns empty (RFC 9535)
 	if index < 0 || index >= length {
 		return nil
 	}
@@ -155,7 +145,6 @@ func (e *Evaluator) evalIndexSelector(result Result, index int) []Result {
 	return []Result{arr[index]}
 }
 
-// evalSliceSelector 评估切片选择器
 func (e *Evaluator) evalSliceSelector(result Result, slice *SliceParams) []Result {
 	if !result.IsArray() {
 		return nil
@@ -170,24 +159,20 @@ func (e *Evaluator) evalSliceSelector(result Result, slice *SliceParams) []Resul
 	}
 
 	if step == 0 {
-		return nil // RFC 规定 step=0 返回空
+		return nil // RFC 9535: step=0 returns empty
 	}
 
 	start, end, endIsDefault := e.normalizeSliceBounds(slice.Start, slice.End, step, arrLen)
 
 	var results []Result
 	if step > 0 {
-		// 正步长：从 start 到 end（不包含）
 		for i := start; i < end; i += step {
 			if i >= 0 && i < arrLen {
 				results = append(results, arr[i])
 			}
 		}
 	} else {
-		// 负步长：从 start 向下到 end（不包含）
-		// endIsDefault 表示 end 是否为默认值（对于默认的 -1，包含最后一个元素）
 		if endIsDefault {
-			// 默认 end，从最后一个元素开始
 			for i := start; i >= 0; i += step {
 				results = append(results, arr[i])
 			}
@@ -203,10 +188,9 @@ func (e *Evaluator) evalSliceSelector(result Result, slice *SliceParams) []Resul
 	return results
 }
 
-// normalizeSliceBounds 计算切片边界的规范化值
-// 返回 (start, end, endIsDefault)
+// normalizeSliceBounds normalizes slice bounds
+// Returns (start, end, endIsDefault)
 func (e *Evaluator) normalizeSliceBounds(start, end *int, step, arrLen int) (int, int, bool) {
-	// 默认值（RFC 9535 表 8）
 	s := 0
 	if start != nil {
 		s = *start
@@ -225,11 +209,10 @@ func (e *Evaluator) normalizeSliceBounds(start, end *int, step, arrLen int) (int
 			en = arrLen + en
 		}
 	} else if step < 0 {
-		en = -1 // 标记为默认 end，需要特殊处理
+		en = -1 // Mark as default end, needs special handling
 		endIsDefault = true
 	}
 
-	// bounds 限制
 	s = clamp(s, 0, arrLen-1)
 	if !endIsDefault {
 		en = clamp(en, 0, arrLen)
@@ -238,7 +221,6 @@ func (e *Evaluator) normalizeSliceBounds(start, end *int, step, arrLen int) (int
 	return s, en, endIsDefault
 }
 
-// clamp 将值限制在 [min, max] 范围内
 func clamp(v, min, max int) int {
 	if v < min {
 		return min
@@ -249,7 +231,6 @@ func clamp(v, min, max int) int {
 	return v
 }
 
-// evalFilterSelector 评估过滤器选择器
 func (e *Evaluator) evalFilterSelector(result Result, filter *FilterExpr) []Result {
 	var results []Result
 
@@ -270,7 +251,6 @@ func (e *Evaluator) evalFilterSelector(result Result, filter *FilterExpr) []Resu
 	return results
 }
 
-// evalFilterExpr 评估过滤表达式
 func (e *Evaluator) evalFilterExpr(currentNode Result, expr *FilterExpr) bool {
 	switch expr.Type {
 	case FilterLogicalOr:
@@ -289,12 +269,10 @@ func (e *Evaluator) evalFilterExpr(currentNode Result, expr *FilterExpr) bool {
 	return false
 }
 
-// evalComparison 评估比较表达式
 func (e *Evaluator) evalComparison(currentNode Result, comp *Comparison) bool {
 	left := e.evalComparable(currentNode, comp.Left)
 	right := e.evalComparable(currentNode, comp.Right)
 
-	// 处理空 nodelist（RFC 9535 规则）
 	leftEmpty := !left.Exists()
 	rightEmpty := !right.Exists()
 
@@ -309,7 +287,6 @@ func (e *Evaluator) evalComparison(currentNode Result, comp *Comparison) bool {
 		}
 	}
 
-	// 实际比较
 	switch comp.Op {
 	case CompEq:
 		return e.compareEqual(left, right)
@@ -327,7 +304,6 @@ func (e *Evaluator) evalComparison(currentNode Result, comp *Comparison) bool {
 	return false
 }
 
-// evalComparable 评估可比较值
 func (e *Evaluator) evalComparable(currentNode Result, c *Comparable) Result {
 	switch c.Type {
 	case ComparableLiteral:
@@ -341,7 +317,6 @@ func (e *Evaluator) evalComparable(currentNode Result, c *Comparable) Result {
 	return Result{}
 }
 
-// evalLiteral 评估字面量
 func (e *Evaluator) evalLiteral(lit *LiteralValue) Result {
 	switch lit.Type {
 	case LiteralString:
@@ -359,7 +334,6 @@ func (e *Evaluator) evalLiteral(lit *LiteralValue) Result {
 	return Result{}
 }
 
-// evalSingularQuery 评估单值查询
 func (e *Evaluator) evalSingularQuery(currentNode Result, query *SingularQuery) Result {
 	results := e.evalQuerySegments(currentNode, query.Relative, query.Segments)
 	if len(results) == 0 {
@@ -368,7 +342,7 @@ func (e *Evaluator) evalSingularQuery(currentNode Result, query *SingularQuery) 
 	return results[0]
 }
 
-// evalQuerySegments 通用 segment 求值逻辑
+// evalQuerySegments evaluates segments (shared logic for singular/filter queries)
 func (e *Evaluator) evalQuerySegments(currentNode Result, relative bool, segments []*SingularSegment) []Result {
 	var results []Result
 	if relative {
@@ -396,7 +370,6 @@ func (e *Evaluator) evalQuerySegments(currentNode Result, relative bool, segment
 	return results
 }
 
-// evalTestExpr 评估测试表达式
 func (e *Evaluator) evalTestExpr(currentNode Result, test *TestExpr) bool {
 	if test.FilterQuery != nil {
 		return e.evalFilterQueryTest(currentNode, test.FilterQuery)
@@ -406,21 +379,19 @@ func (e *Evaluator) evalTestExpr(currentNode Result, test *TestExpr) bool {
 		if !ok {
 			return false
 		}
-		// LogicalType 或 NodesType 结果转换为逻辑值
-		// LogicalType: 存在即为 true
-		// NodesType: 非空即为 true
+		// Convert LogicalType or NodesType result to logical value
+		// LogicalType: existence means true
+		// NodesType: non-empty means true
 		return e.funcResultToLogical(result)
 	}
 	return false
 }
 
-// evalFilterQueryTest 评估过滤查询测试（存在性测试）
 func (e *Evaluator) evalFilterQueryTest(currentNode Result, fq *FilterQuery) bool {
 	results := e.evalFilterQuery(currentNode, fq)
 	return len(results) > 0
 }
 
-// evalFilterQuery 评估 FilterQuery 返回结果列表
 func (e *Evaluator) evalFilterQuery(currentNode Result, fq *FilterQuery) []Result {
 	var results []Result
 	if fq.Relative {
@@ -445,9 +416,7 @@ func (e *Evaluator) evalFilterQuery(currentNode Result, fq *FilterQuery) []Resul
 	return results
 }
 
-// compareEqual 比较两个值是否相等
 func (e *Evaluator) compareEqual(a, b Result) bool {
-	// 类型不同则不相等
 	if a.Type != b.Type {
 		return false
 	}
@@ -462,15 +431,12 @@ func (e *Evaluator) compareEqual(a, b Result) bool {
 	case JSONTypeString:
 		return a.Str == b.Str
 	case JSONTypeJSON:
-		// 对象或数组的深度比较
 		return a.Raw == b.Raw
 	}
 	return false
 }
 
-// compareLess 比较两个值的大小
 func (e *Evaluator) compareLess(a, b Result) bool {
-	// 只有数字和字符串可以比较大小
 	if a.Type != b.Type {
 		return false
 	}
@@ -484,21 +450,15 @@ func (e *Evaluator) compareLess(a, b Result) bool {
 	return false
 }
 
-// funcResultToLogical 将函数结果转换为逻辑值
-// 用于测试表达式中的函数调用结果
 func (e *Evaluator) funcResultToLogical(result Result) bool {
-	// 如果是 Nothing（不存在），返回 false
 	if !result.Exists() {
 		return false
 	}
-	// 对于 LogicalType 结果（JSONTypeTrue 或 JSONTypeFalse）
-	// true 表示 LogicalTrue，false 表示 LogicalFalse
 	if result.Type == JSONTypeTrue {
 		return true
 	}
 	if result.Type == JSONTypeFalse {
 		return false
 	}
-	// 对于其他类型（NodesType），存在即为 LogicalTrue
 	return true
 }

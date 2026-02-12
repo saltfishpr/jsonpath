@@ -1,5 +1,6 @@
-// Package jsonpath 实现了 JSONPath 语法的解析和查询功能，提供 gjson 风格的 API。
-// 实现基于 RFC 9535 规范：https://www.rfc-editor.org/rfc/rfc9535.html
+// Package jsonpath implements JSONPath query syntax parser and evaluator with gjson-style API.
+//
+// The implementation follows RFC 9535: https://www.rfc-editor.org/rfc/rfc9535.html
 package jsonpath
 
 import (
@@ -7,7 +8,7 @@ import (
 	"strings"
 )
 
-// JSONType is Result type
+// JSONType represents the type of a JSON value
 type JSONType int
 
 const (
@@ -25,12 +26,12 @@ const (
 	JSONTypeJSON
 )
 
-// String returns a string representation of the type.
+// String returns a string representation of the type
 func (t JSONType) String() string {
 	return []string{"Null", "False", "Number", "String", "True", "JSON"}[t]
 }
 
-// Result represents a json value that is returned from Get().
+// Result represents a JSON value returned from Get()
 type Result struct {
 	// Type is the json type
 	Type JSONType
@@ -44,7 +45,7 @@ type Result struct {
 	Index int
 }
 
-// Get 执行 JSONPath 查询，返回第一个匹配结果
+// Get executes a JSONPath query and returns the first result
 func Get(json, path string) Result {
 	query, err := Parse(path)
 	if err != nil {
@@ -58,12 +59,12 @@ func Get(json, path string) Result {
 	return results[0]
 }
 
-// GetBytes 执行 JSONPath 查询，支持 []byte 输入
+// GetBytes executes a JSONPath query with []byte input
 func GetBytes(json []byte, path string) Result {
 	return Get(string(json), path)
 }
 
-// Get 在当前结果上继续查询
+// Get continues a query from the current result
 func (r Result) Get(path string) Result {
 	if !r.Exists() {
 		return Result{}
@@ -71,7 +72,7 @@ func (r Result) Get(path string) Result {
 	return Get(r.Raw, path)
 }
 
-// GetMany 执行 JSONPath 查询，返回所有匹配结果
+// GetMany executes a JSONPath query and returns all results
 func GetMany(json, path string) []Result {
 	query, err := Parse(path)
 	if err != nil {
@@ -81,12 +82,12 @@ func GetMany(json, path string) []Result {
 	return eval.Evaluate()
 }
 
-// GetManyBytes 执行 JSONPath 查询，支持 []byte 输入
+// GetManyBytes executes a JSONPath query with []byte input
 func GetManyBytes(json []byte, path string) []Result {
 	return GetMany(string(json), path)
 }
 
-// GetMany 在当前结果上继续查询
+// GetMany continues a query from the current result
 func (r Result) GetMany(path string) []Result {
 	if !r.Exists() {
 		return nil
@@ -94,27 +95,27 @@ func (r Result) GetMany(path string) []Result {
 	return GetMany(r.Raw, path)
 }
 
-// Exists 检查结果是否存在
+// Exists checks if the result exists
 func (r Result) Exists() bool {
 	return r.Type != JSONTypeNull || len(r.Raw) != 0
 }
 
-// IsObject 检查结果是否为 JSON 对象
+// IsObject checks if the result is a JSON object
 func (r Result) IsObject() bool {
 	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '{'
 }
 
-// IsArray 检查结果是否为 JSON 数组
+// IsArray checks if the result is a JSON array
 func (r Result) IsArray() bool {
 	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '['
 }
 
-// IsBool 检查结果是否为布尔值
+// IsBool checks if the result is a boolean
 func (r Result) IsBool() bool {
 	return r.Type == JSONTypeTrue || r.Type == JSONTypeFalse
 }
 
-// String 返回字符串表示
+// String returns the string representation
 func (r Result) String() string {
 	switch r.Type {
 	case JSONTypeNull:
@@ -137,17 +138,17 @@ func (r Result) String() string {
 	}
 }
 
-// Int 返回整数表示
+// Int returns the int64 representation
 func (r Result) Int() int64 {
 	panic("TODO")
 }
 
-// Uint 返回无符号整数表示
+// Uint returns the uint64 representation
 func (r Result) Uint() uint64 {
 	panic("TODO")
 }
 
-// Float 返回浮点数表示
+// Float returns the float64 representation
 func (r Result) Float() float64 {
 	switch r.Type {
 	case JSONTypeTrue:
@@ -161,7 +162,7 @@ func (r Result) Float() float64 {
 	return 0
 }
 
-// Bool 返回布尔值表示
+// Bool returns the bool representation
 func (r Result) Bool() bool {
 	switch r.Type {
 	case JSONTypeTrue:
@@ -177,7 +178,7 @@ func (r Result) Bool() bool {
 	return false
 }
 
-// Array 返回数组表示
+// Array returns the []Result representation
 func (r Result) Array() []Result {
 	if r.Type == JSONTypeNull {
 		return []Result{}
@@ -205,7 +206,7 @@ func (r Result) Array() []Result {
 	return results
 }
 
-// Map 返回对象表示
+// Map returns the map[string]Result representation
 func (r Result) Map() map[string]Result {
 	if r.Type == JSONTypeNull {
 		return map[string]Result{}
@@ -253,7 +254,7 @@ func (r Result) MapKVList() []KV {
 	return results
 }
 
-// Value 返回 Go 原生值表示
+// Value returns the Go native value representation
 func (r Result) Value() interface{} {
 	switch r.Type {
 	case JSONTypeNull:
