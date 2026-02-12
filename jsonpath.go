@@ -258,6 +258,42 @@ func (r Result) Map() map[string]Result {
 	return results
 }
 
+type KV struct {
+	Key   string
+	Value Result
+}
+
+func (r Result) MapKVList() []KV {
+	if r.Type == JSONTypeNull {
+		return []KV{}
+	}
+	if !r.IsObject() {
+		return []KV{}
+	}
+
+	var results []KV
+	i := 1 // 跳过 '{'
+	for i < len(r.Raw) {
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i >= len(r.Raw) {
+			break
+		}
+		if r.Raw[i] == '}' {
+			break
+		}
+
+		key, value, next := parseObjectMember(r.Raw, i)
+		results = append(results, KV{Key: key, Value: value})
+		i = next
+
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i < len(r.Raw) && r.Raw[i] == ',' {
+			i++
+		}
+	}
+	return results
+}
+
 // Value 返回 Go 原生值表示
 func (r Result) Value() interface{} {
 	switch r.Type {

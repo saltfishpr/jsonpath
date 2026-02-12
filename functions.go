@@ -36,8 +36,8 @@ type FuncContext int
 
 const (
 	ContextComparable FuncContext = iota // 作为比较表达式的一部分
-	ContextTest                           // 作为测试表达式
-	ContextArgument                       // 作为函数参数
+	ContextTest                          // 作为测试表达式
+	ContextArgument                      // 作为函数参数
 )
 
 // 内置函数签名表

@@ -83,8 +83,8 @@ func (e *Evaluator) collectDescendants(result Result, selectors []*Selector, res
 			e.collectDescendants(elem, selectors, results)
 		}
 	} else if result.IsObject() {
-		for _, value := range result.Map() {
-			e.collectDescendants(value, selectors, results)
+		for _, kv := range result.MapKVList() {
+			e.collectDescendants(kv.Value, selectors, results)
 		}
 	}
 }
@@ -126,8 +126,8 @@ func (e *Evaluator) evalWildcardSelector(result Result) []Result {
 	}
 	if result.IsObject() {
 		var results []Result
-		for _, v := range result.Map() {
-			results = append(results, v)
+		for _, kv := range result.MapKVList() {
+			results = append(results, kv.Value)
 		}
 		return results
 	}
@@ -260,9 +260,9 @@ func (e *Evaluator) evalFilterSelector(result Result, filter *FilterExpr) []Resu
 			}
 		}
 	} else if result.IsObject() {
-		for _, value := range result.Map() {
-			if e.evalFilterExpr(value, filter) {
-				results = append(results, value)
+		for _, kv := range result.MapKVList() {
+			if e.evalFilterExpr(kv.Value, filter) {
+				results = append(results, kv.Value)
 			}
 		}
 	}
