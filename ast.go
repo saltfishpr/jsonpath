@@ -19,11 +19,11 @@ type Segment struct {
 	Selectors []*Selector
 }
 
-// SelectorKind distinguishes different selector types
-type SelectorKind int
+// SelectorType distinguishes different selector types
+type SelectorType int
 
 const (
-	NameSelector     SelectorKind = iota // 'name' or "name"
+	NameSelector     SelectorType = iota // 'name' or "name"
 	WildcardSelector                     // *
 	IndexSelector                        // integer index
 	SliceSelector                        // start:end:step
@@ -32,7 +32,7 @@ const (
 
 // Selector represents a single selector within a segment
 type Selector struct {
-	Kind   SelectorKind
+	Type   SelectorType
 	Name   string       // for NameSelector
 	Index  int          // for IndexSelector
 	Slice  *SliceParams // for SliceSelector
@@ -46,11 +46,11 @@ type SliceParams struct {
 	Step  *int // nil means default (1)
 }
 
-// FilterExprKind identifies the kind of filter expression
-type FilterExprKind int
+// FilterExprType identifies the type of filter expression
+type FilterExprType int
 
 const (
-	FilterLogicalOr  FilterExprKind = iota // left || right
+	FilterLogicalOr  FilterExprType = iota // left || right
 	FilterLogicalAnd                       // left && right
 	FilterLogicalNot                       // !operand
 	FilterParen                            // (operand)
@@ -60,7 +60,7 @@ const (
 
 // FilterExpr represents a filter expression (logical expression)
 type FilterExpr struct {
-	Kind FilterExprKind
+	Type FilterExprType
 	// For LogicalOr/LogicalAnd
 	Left  *FilterExpr
 	Right *FilterExpr
@@ -91,18 +91,18 @@ type Comparison struct {
 	Right *Comparable
 }
 
-// ComparableKind identifies what a comparable holds
-type ComparableKind int
+// ComparableType identifies what a comparable holds
+type ComparableType int
 
 const (
-	ComparableLiteral ComparableKind = iota
+	ComparableLiteral ComparableType = iota
 	ComparableSingularQuery
 	ComparableFuncExpr
 )
 
 // Comparable is one side of a comparison (literal, singular query, or function)
 type Comparable struct {
-	Kind ComparableKind
+	Type ComparableType
 	// For literal
 	Literal *LiteralValue
 	// For singular query
@@ -114,11 +114,11 @@ type Comparable struct {
 type LiteralType int
 
 const (
-	LiteralTypeString LiteralType = iota
-	LiteralTypeNumber
-	LiteralTypeTrue
-	LiteralTypeFalse
-	LiteralTypeNull
+	LiteralString LiteralType = iota
+	LiteralNumber
+	LiteralTrue
+	LiteralFalse
+	LiteralNull
 )
 
 // LiteralValue 字面量
@@ -133,17 +133,22 @@ type SingularQuery struct {
 	Segments []*SingularSegment
 }
 
+type SingularSegmentType int
+
+const (
+	SingularNameSegment SingularSegmentType = iota
+	SingularIndexSegment
+)
+
 // SingularSegment is a name or index segment in a singular query
 type SingularSegment struct {
-	IsIndex bool
-	Name    string
-	Index   int
+	Type  SingularSegmentType
+	Name  string
+	Index int
 }
 
 // TestExpr represents a test expression (existence or function)
 type TestExpr struct {
-	Negated bool
-	// Either a filter query (existence test) or function call
 	FilterQuery *FilterQuery
 	FuncExpr    *FuncCall
 }
@@ -160,21 +165,21 @@ type FuncCall struct {
 	Args []*FuncArg
 }
 
+// FuncArgType identifies the type of function argument
+type FuncArgType int
+
+const (
+	FuncArgLiteral FuncArgType = iota
+	FuncArgFilterQuery
+	FuncArgLogicalExpr
+	FuncArgFuncExpr
+)
+
 // FuncArg represents a function argument
 type FuncArg struct {
-	Kind        FuncArgKind
+	Type        FuncArgType
 	Literal     *LiteralValue
 	FilterQuery *FilterQuery
 	LogicalExpr *FilterExpr
 	FuncExpr    *FuncCall
 }
-
-// FuncArgKind identifies the kind of function argument
-type FuncArgKind int
-
-const (
-	FuncArgLiteral FuncArgKind = iota
-	FuncArgFilterQuery
-	FuncArgLogicalExpr
-	FuncArgFuncExpr
-)
