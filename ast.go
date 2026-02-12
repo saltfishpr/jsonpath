@@ -1,11 +1,11 @@
 package jsonpath
 
-// Query represents a complete JSONPath query: $ followed by segments
+// Query represents a JSONPath query: $ followed by segments.
 type Query struct {
 	Segments []*Segment
 }
 
-// SegmentType distinguishes child vs descendant segments
+// SegmentType distinguishes child vs descendant segments.
 type SegmentType int
 
 const (
@@ -13,13 +13,13 @@ const (
 	DescendantSegment
 )
 
-// Segment is a child or descendant segment containing selectors
+// Segment is a child or descendant segment containing selectors.
 type Segment struct {
 	Type      SegmentType
 	Selectors []*Selector
 }
 
-// SelectorType distinguishes different selector types
+// SelectorType distinguishes different selector types.
 type SelectorType int
 
 const (
@@ -30,7 +30,7 @@ const (
 	FilterSelector                       // ?<logical-expr>
 )
 
-// Selector represents a single selector within a segment
+// Selector represents a single selector within a segment.
 type Selector struct {
 	Type   SelectorType
 	Name   string       // for NameSelector
@@ -39,14 +39,14 @@ type Selector struct {
 	Filter *FilterExpr  // for FilterSelector
 }
 
-// SliceParams holds the start:end:step parameters for a slice selector
+// SliceParams holds start:end:step for a slice selector.
 type SliceParams struct {
-	Start *int // nil means default
-	End   *int // nil means default
-	Step  *int // nil means default (1)
+	Start *int
+	End   *int
+	Step  *int
 }
 
-// FilterExprType identifies the type of filter expression
+// FilterExprType identifies the type of filter expression.
 type FilterExprType int
 
 const (
@@ -58,21 +58,17 @@ const (
 	FilterTest                             // test expression
 )
 
-// FilterExpr represents a filter expression (logical expression)
+// FilterExpr represents a filter expression.
 type FilterExpr struct {
-	Type FilterExprType
-	// For LogicalOr/LogicalAnd
-	Left  *FilterExpr
-	Right *FilterExpr
-	// For LogicalNot/Paren
+	Type    FilterExprType
+	Left    *FilterExpr
+	Right   *FilterExpr
 	Operand *FilterExpr
-	// For Comparison
-	Comp *Comparison
-	// For TestExpr (existence test or function test)
-	Test *TestExpr
+	Comp    *Comparison
+	Test    *TestExpr
 }
 
-// CompOp is a comparison operator
+// CompOp is a comparison operator.
 type CompOp int
 
 const (
@@ -84,14 +80,14 @@ const (
 	CompGe               // >=
 )
 
-// Comparison represents a comparison expression
+// Comparison represents a comparison expression.
 type Comparison struct {
 	Left  *Comparable
 	Op    CompOp
 	Right *Comparable
 }
 
-// ComparableType identifies what a comparable holds
+// ComparableType identifies what a comparable holds.
 type ComparableType int
 
 const (
@@ -100,15 +96,12 @@ const (
 	ComparableFuncExpr
 )
 
-// Comparable is one side of a comparison (literal, singular query, or function)
+// Comparable is one side of a comparison.
 type Comparable struct {
-	Type ComparableType
-	// For literal
-	Literal *LiteralValue
-	// For singular query
-	SingularQuery *SingularQuery
-	// For function expression
-	FuncExpr *FuncCall
+	Type           ComparableType
+	Literal        *LiteralValue
+	SingularQuery  *SingularQuery
+	FuncExpr       *FuncCall
 }
 
 type LiteralType int

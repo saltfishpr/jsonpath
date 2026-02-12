@@ -27,22 +27,7 @@ const (
 
 // String returns a string representation of the type.
 func (t JSONType) String() string {
-	switch t {
-	default:
-		return ""
-	case JSONTypeNull:
-		return "Null"
-	case JSONTypeFalse:
-		return "False"
-	case JSONTypeNumber:
-		return "Number"
-	case JSONTypeString:
-		return "String"
-	case JSONTypeTrue:
-		return "True"
-	case JSONTypeJSON:
-		return "JSON"
-	}
+	return []string{"Null", "False", "Number", "String", "True", "JSON"}[t]
 }
 
 // Result represents a json value that is returned from Get().
@@ -132,23 +117,23 @@ func (r Result) IsBool() bool {
 // String 返回字符串表示
 func (r Result) String() string {
 	switch r.Type {
-	default:
-		return ""
 	case JSONTypeNull:
 		return ""
 	case JSONTypeFalse:
 		return "false"
+	case JSONTypeTrue:
+		return "true"
+	case JSONTypeString:
+		return r.Str
 	case JSONTypeNumber:
-		if len(r.Raw) == 0 {
+		if r.Raw == "" {
 			return strconv.FormatFloat(r.Num, 'f', -1, 64)
 		}
 		return r.Raw
-	case JSONTypeString:
-		return r.Str
-	case JSONTypeTrue:
-		return "true"
 	case JSONTypeJSON:
 		return r.Raw
+	default:
+		return ""
 	}
 }
 
@@ -172,9 +157,8 @@ func (r Result) Float() float64 {
 	case JSONTypeString:
 		f, _ := strconv.ParseFloat(r.Str, 64)
 		return f
-	default:
-		return 0
 	}
+	return 0
 }
 
 // Bool 返回布尔值表示
@@ -189,9 +173,8 @@ func (r Result) Bool() bool {
 		return b
 	case JSONTypeNumber:
 		return r.Num != 0
-	default:
-		return false
 	}
+	return false
 }
 
 // Array 返回数组表示
@@ -204,16 +187,12 @@ func (r Result) Array() []Result {
 	}
 
 	var results []Result
-	i := 1 // 跳过 '['
+	i := 1
 	for i < len(r.Raw) {
 		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) {
+		if i >= len(r.Raw) || r.Raw[i] == ']' {
 			break
 		}
-		if r.Raw[i] == ']' {
-			break
-		}
-
 		elem, next := parseArrayElement(r.Raw, i)
 		results = append(results, elem)
 		i = next
@@ -236,24 +215,8 @@ func (r Result) Map() map[string]Result {
 	}
 
 	results := make(map[string]Result)
-	i := 1 // 跳过 '{'
-	for i < len(r.Raw) {
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) {
-			break
-		}
-		if r.Raw[i] == '}' {
-			break
-		}
-
-		key, value, next := parseObjectMember(r.Raw, i)
-		results[key] = value
-		i = next
-
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i < len(r.Raw) && r.Raw[i] == ',' {
-			i++
-		}
+	for _, kv := range r.MapKVList() {
+		results[kv.Key] = kv.Value
 	}
 	return results
 }
@@ -272,16 +235,12 @@ func (r Result) MapKVList() []KV {
 	}
 
 	var results []KV
-	i := 1 // 跳过 '{'
+	i := 1
 	for i < len(r.Raw) {
 		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) {
+		if i >= len(r.Raw) || r.Raw[i] == '}' {
 			break
 		}
-		if r.Raw[i] == '}' {
-			break
-		}
-
 		key, value, next := parseObjectMember(r.Raw, i)
 		results = append(results, KV{Key: key, Value: value})
 		i = next
@@ -314,8 +273,6 @@ func (r Result) Value() interface{} {
 		if r.IsObject() {
 			return r.Map()
 		}
-		return nil
-	default:
-		return nil
 	}
+	return nil
 }

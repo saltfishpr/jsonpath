@@ -361,18 +361,23 @@ func (e *Evaluator) evalLiteral(lit *LiteralValue) Result {
 
 // evalSingularQuery 评估单值查询
 func (e *Evaluator) evalSingularQuery(currentNode Result, query *SingularQuery) Result {
-	var results []Result
+	results := e.evalQuerySegments(currentNode, query.Relative, query.Segments)
+	if len(results) == 0 {
+		return Result{}
+	}
+	return results[0]
+}
 
-	if query.Relative {
-		// 相对查询，从当前节点开始
+// evalQuerySegments 通用 segment 求值逻辑
+func (e *Evaluator) evalQuerySegments(currentNode Result, relative bool, segments []*SingularSegment) []Result {
+	var results []Result
+	if relative {
 		results = []Result{currentNode}
 	} else {
-		// 绝对查询，从根节点开始
 		results = []Result{parseValue(e.json)}
 	}
 
-	// 应用每个段
-	for _, seg := range query.Segments {
+	for _, seg := range segments {
 		var newResults []Result
 		for _, r := range results {
 			if seg.Type == SingularNameSegment {
@@ -385,14 +390,10 @@ func (e *Evaluator) evalSingularQuery(currentNode Result, query *SingularQuery) 
 		}
 		results = newResults
 		if len(results) == 0 {
-			return Result{}
+			return nil
 		}
 	}
-
-	if len(results) == 0 {
-		return Result{}
-	}
-	return results[0]
+	return results
 }
 
 // evalTestExpr 评估测试表达式
@@ -415,15 +416,19 @@ func (e *Evaluator) evalTestExpr(currentNode Result, test *TestExpr) bool {
 
 // evalFilterQueryTest 评估过滤查询测试（存在性测试）
 func (e *Evaluator) evalFilterQueryTest(currentNode Result, fq *FilterQuery) bool {
-	var results []Result
+	results := e.evalFilterQuery(currentNode, fq)
+	return len(results) > 0
+}
 
+// evalFilterQuery 评估 FilterQuery 返回结果列表
+func (e *Evaluator) evalFilterQuery(currentNode Result, fq *FilterQuery) []Result {
+	var results []Result
 	if fq.Relative {
 		results = []Result{currentNode}
 	} else {
 		results = []Result{parseValue(e.json)}
 	}
 
-	// 应用每个段
 	for _, seg := range fq.Segments {
 		var newResults []Result
 		for _, r := range results {
@@ -434,11 +439,10 @@ func (e *Evaluator) evalFilterQueryTest(currentNode Result, fq *FilterQuery) boo
 		}
 		results = newResults
 		if len(results) == 0 {
-			return false
+			return nil
 		}
 	}
-
-	return len(results) > 0
+	return results
 }
 
 // compareEqual 比较两个值是否相等

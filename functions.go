@@ -202,32 +202,10 @@ func (e *Evaluator) evalLiteralArg(lit *LiteralValue, expectedType FuncParamType
 
 // evalFilterQueryArg 评估查询参数
 func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expectedType FuncParamType) (evalFuncResult, bool) {
-	var results []Result
-
-	if fq.Relative {
-		results = []Result{currentNode}
-	} else {
-		results = []Result{parseValue(e.json)}
-	}
-
-	// 应用每个段
-	for _, seg := range fq.Segments {
-		var newResults []Result
-		for _, r := range results {
-			for _, selector := range seg.Selectors {
-				selected := e.evaluateSelector(r, selector)
-				newResults = append(newResults, selected...)
-			}
-		}
-		results = newResults
-		if len(results) == 0 {
-			break
-		}
-	}
+	results := e.evalFilterQuery(currentNode, fq)
 
 	switch expectedType {
 	case ParamTypeValueType:
-		// ValueType: 单值查询结果
 		if len(results) == 0 {
 			return evalFuncResult{isNothing: true, resultType: ResultTypeValueType}, true
 		}
@@ -247,7 +225,6 @@ func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expe
 			isNothing:  false,
 		}, true
 	case ParamTypeLogicalType:
-		// NodesType 可以隐式转换为 LogicalType
 		logical := len(results) > 0
 		return evalFuncResult{
 			logical:    logical,
@@ -435,59 +412,52 @@ func (e *Evaluator) builtinCount(args []evalFuncResult) (Result, bool) {
 
 // builtinMatch 实现 match() 函数
 func (e *Evaluator) builtinMatch(args []evalFuncResult) (Result, bool) {
-	if len(args) != 2 {
-		return Result{}, false
-	}
-
-	// 第一个参数: 字符串
-	input := args[0]
-	if input.isNothing || input.resultType != ResultTypeValueType || input.value.Type != JSONTypeString {
-		return e.logicalResult(false), true // LogicalFalse
-	}
-
-	// 第二个参数: 正则表达式
-	pattern := args[1]
-	if pattern.isNothing || pattern.resultType != ResultTypeValueType || pattern.value.Type != JSONTypeString {
-		return e.logicalResult(false), true // LogicalFalse
-	}
-
-	// 编译正则表达式
-	re, err := regexp.Compile("^" + pattern.value.Str + "$")
-	if err != nil {
-		// 无效的正则表达式，返回 LogicalFalse
+	input, pattern, ok := e.checkTwoStringArgs(args)
+	if !ok {
 		return e.logicalResult(false), true
 	}
 
-	matched := re.MatchString(input.value.Str)
+	re, err := regexp.Compile("^" + pattern + "$")
+	if err != nil {
+		return e.logicalResult(false), true
+	}
+
+	matched := re.MatchString(input)
 	return e.logicalResult(matched), true
+}
+
+// checkTwoStringArgs 检查两个参数是否都是字符串
+func (e *Evaluator) checkTwoStringArgs(args []evalFuncResult) (string, string, bool) {
+	if len(args) != 2 {
+		return "", "", false
+	}
+
+	input := args[0]
+	if input.isNothing || input.resultType != ResultTypeValueType || input.value.Type != JSONTypeString {
+		return "", "", false
+	}
+
+	pattern := args[1]
+	if pattern.isNothing || pattern.resultType != ResultTypeValueType || pattern.value.Type != JSONTypeString {
+		return "", "", false
+	}
+
+	return input.value.Str, pattern.value.Str, true
 }
 
 // builtinSearch 实现 search() 函数
 func (e *Evaluator) builtinSearch(args []evalFuncResult) (Result, bool) {
-	if len(args) != 2 {
-		return Result{}, false
-	}
-
-	// 第一个参数: 字符串
-	input := args[0]
-	if input.isNothing || input.resultType != ResultTypeValueType || input.value.Type != JSONTypeString {
-		return e.logicalResult(false), true // LogicalFalse
-	}
-
-	// 第二个参数: 正则表达式
-	pattern := args[1]
-	if pattern.isNothing || pattern.resultType != ResultTypeValueType || pattern.value.Type != JSONTypeString {
-		return e.logicalResult(false), true // LogicalFalse
-	}
-
-	// 编译正则表达式
-	re, err := regexp.Compile(pattern.value.Str)
-	if err != nil {
-		// 无效的正则表达式，返回 LogicalFalse
+	input, pattern, ok := e.checkTwoStringArgs(args)
+	if !ok {
 		return e.logicalResult(false), true
 	}
 
-	matched := re.MatchString(input.value.Str)
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return e.logicalResult(false), true
+	}
+
+	matched := re.MatchString(input)
 	return e.logicalResult(matched), true
 }
 
