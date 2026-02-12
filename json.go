@@ -218,3 +218,151 @@ func skipWhitespaceJSON(json string, i int) int {
 	}
 	return i
 }
+
+// parseArrayElement 解析 JSON 数组元素，返回元素和下一个位置
+func parseArrayElement(json string, i int) (Result, int) {
+	i = skipWhitespaceJSON(json, i)
+	if i >= len(json) {
+		return Result{}, i
+	}
+
+	var value Result
+	var ok bool
+
+	switch json[i] {
+	case '"':
+		value.Type = JSONTypeString
+		value.Raw, value.Str = tostr(json[i:])
+		i += len(value.Raw)
+	case '{':
+		value.Type = JSONTypeJSON
+		value.Raw = squashJSONObject(json[i:])
+		i += len(value.Raw)
+	case '[':
+		value.Type = JSONTypeJSON
+		value.Raw = squashJSONArray(json[i:])
+		i += len(value.Raw)
+	case 'n':
+		value.Type = JSONTypeNull
+		value.Raw = tolit(json[i:])
+		i += len(value.Raw)
+	case 't':
+		value.Type = JSONTypeTrue
+		value.Raw = tolit(json[i:])
+		i += len(value.Raw)
+	case 'f':
+		value.Type = JSONTypeFalse
+		value.Raw = tolit(json[i:])
+		i += len(value.Raw)
+	case '+', '-', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		value.Type = JSONTypeNumber
+		value.Raw, value.Num = tonum(json[i:])
+		i += len(value.Raw)
+	default:
+		ok = false
+	}
+
+	if ok || value.Exists() {
+		return value, i
+	}
+	return Result{}, i
+}
+
+// parseObjectMember 解析 JSON 对象成员，返回 key, value 和下一个位置
+func parseObjectMember(json string, i int) (string, Result, int) {
+	i = skipWhitespaceJSON(json, i)
+	if i >= len(json) || json[i] != '"' {
+		return "", Result{}, i
+	}
+
+	// 解析 key (格式: "key")
+	rawKey, keyStr := tostr(json[i:])
+	key := keyStr
+	i += len(rawKey)
+
+	// 跳过冒号和空白
+	i = skipWhitespaceJSON(json, i)
+	if i >= len(json) || json[i] != ':' {
+		return key, Result{}, i
+	}
+	i++
+	i = skipWhitespaceJSON(json, i)
+
+	// 解析 value
+	value, nextPos := parseArrayElement(json, i)
+	return key, value, nextPos
+}
+
+// squashJSONArray 提取完整的 JSON 数组
+func squashJSONArray(json string) string {
+	depth := 0
+	for i := 0; i < len(json); i++ {
+		switch json[i] {
+		case '"':
+			i++
+			for ; i < len(json); i++ {
+				if json[i] == '"' {
+					if json[i-1] != '\\' {
+						break
+					}
+					// 检查转义斜杠
+					n := 0
+					for j := i - 2; j >= 0; j-- {
+						if json[j] != '\\' {
+							break
+						}
+						n++
+					}
+					if n%2 == 0 {
+						break
+					}
+				}
+			}
+		case '[':
+			depth++
+		case ']':
+			depth--
+			if depth == 0 {
+				return json[:i+1]
+			}
+		}
+	}
+	return json
+}
+
+// squashJSONObject 提取完整的 JSON 对象
+func squashJSONObject(json string) string {
+	depth := 0
+	for i := 0; i < len(json); i++ {
+		switch json[i] {
+		case '"':
+			i++
+			for ; i < len(json); i++ {
+				if json[i] == '"' {
+					if json[i-1] != '\\' {
+						break
+					}
+					// 检查转义斜杠
+					n := 0
+					for j := i - 2; j >= 0; j-- {
+						if json[j] != '\\' {
+							break
+						}
+						n++
+					}
+					if n%2 == 0 {
+						break
+					}
+				}
+			}
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return json[:i+1]
+			}
+		}
+	}
+	return json
+}

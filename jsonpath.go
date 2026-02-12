@@ -196,12 +196,66 @@ func (r Result) Bool() bool {
 
 // Array 返回数组表示
 func (r Result) Array() []Result {
-	panic("TODO")
+	if r.Type == JSONTypeNull {
+		return []Result{}
+	}
+	if !r.IsArray() {
+		return []Result{r}
+	}
+
+	var results []Result
+	i := 1 // 跳过 '['
+	for i < len(r.Raw) {
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i >= len(r.Raw) {
+			break
+		}
+		if r.Raw[i] == ']' {
+			break
+		}
+
+		elem, next := parseArrayElement(r.Raw, i)
+		results = append(results, elem)
+		i = next
+
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i < len(r.Raw) && r.Raw[i] == ',' {
+			i++
+		}
+	}
+	return results
 }
 
 // Map 返回对象表示
 func (r Result) Map() map[string]Result {
-	panic("TODO")
+	if r.Type == JSONTypeNull {
+		return map[string]Result{}
+	}
+	if !r.IsObject() {
+		return map[string]Result{}
+	}
+
+	results := make(map[string]Result)
+	i := 1 // 跳过 '{'
+	for i < len(r.Raw) {
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i >= len(r.Raw) {
+			break
+		}
+		if r.Raw[i] == '}' {
+			break
+		}
+
+		key, value, next := parseObjectMember(r.Raw, i)
+		results[key] = value
+		i = next
+
+		i = skipWhitespaceJSON(r.Raw, i)
+		if i < len(r.Raw) && r.Raw[i] == ',' {
+			i++
+		}
+	}
+	return results
 }
 
 // Value 返回 Go 原生值表示
