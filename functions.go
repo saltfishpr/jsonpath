@@ -3,7 +3,6 @@ package jsonpath
 import (
 	"regexp"
 	"strconv"
-	"sync"
 )
 
 // FuncResultType is the return type of a function
@@ -49,47 +48,6 @@ var builtinSignatures = map[string]*FuncSignature{
 	"value":  {Name: "value", ParamTypes: []FuncParamType{ParamTypeNodesType}, ReturnType: ResultTypeValueType},
 }
 
-// Custom function registries
-var (
-	customSignatures = make(map[string]*FuncSignature)
-	customHandlers   = make(map[string]FunctionHandler)
-	registryMutex    sync.RWMutex
-)
-
-// FunctionHandler implements a custom function
-// Parameters: evaluator, argument values, function signature
-// Returns: result value, success flag
-type FunctionHandler func(*Evaluator, []evalFuncResult, *FuncSignature) (Result, bool)
-
-// RegisterFunction registers a custom function signature
-func RegisterFunction(name string, paramTypes []FuncParamType, returnType FuncResultType) {
-	registryMutex.Lock()
-	defer registryMutex.Unlock()
-
-	customSignatures[name] = &FuncSignature{
-		Name:       name,
-		ParamTypes: paramTypes,
-		ReturnType: returnType,
-	}
-}
-
-// RegisterFunctionHandler registers a custom function handler
-func RegisterFunctionHandler(name string, handler FunctionHandler) {
-	registryMutex.Lock()
-	defer registryMutex.Unlock()
-
-	customHandlers[name] = handler
-}
-
-// UnregisterFunction unregisters a custom function
-func UnregisterFunction(name string) {
-	registryMutex.Lock()
-	defer registryMutex.Unlock()
-
-	delete(customSignatures, name)
-	delete(customHandlers, name)
-}
-
 // logicalResult converts a bool to Result (LogicalTrue/LogicalFalse)
 func (e *Evaluator) logicalResult(value bool) Result {
 	if value {
@@ -109,17 +67,9 @@ type evalFuncResult struct {
 
 // findFunctionSignature finds a function's signature (builtin or custom)
 func (e *Evaluator) findFunctionSignature(name string) *FuncSignature {
-	registryMutex.RLock()
-	defer registryMutex.RUnlock()
-
 	if sig, ok := builtinSignatures[name]; ok {
 		return sig
 	}
-
-	if sig, ok := customSignatures[name]; ok {
-		return sig
-	}
-
 	return nil
 }
 
@@ -305,14 +255,6 @@ func (e *Evaluator) evalFuncCall(currentNode Result, fn *FuncCall, context FuncC
 
 // callFunction calls a function implementation
 func (e *Evaluator) callFunction(name string, args []evalFuncResult, sig *FuncSignature) (Result, bool) {
-	registryMutex.RLock()
-	handler, hasCustom := customHandlers[name]
-	registryMutex.RUnlock()
-
-	if hasCustom {
-		return handler(e, args, sig)
-	}
-
 	switch name {
 	case "length":
 		return e.builtinLength(args)
