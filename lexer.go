@@ -425,16 +425,6 @@ func isNameChar(r rune) bool {
 	return isNameFirst(r) || isDigit(r)
 }
 
-// function-name-first = LCALPHA
-func isFunctionNameFirst(r rune) bool {
-	return (r >= 'a' && r <= 'z')
-}
-
-// function-name-char = function-name-first / DIGIT / "_"
-func isFunctionNameChar(r rune) bool {
-	return isFunctionNameFirst(r) || (r >= '0' && r <= '9') || r == '_'
-}
-
 func isDigit(r rune) bool {
 	return r >= '0' && r <= '9'
 }

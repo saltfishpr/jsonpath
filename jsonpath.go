@@ -226,13 +226,6 @@ func (r Result) Array() []Result {
 
 // Map returns the map[string]Result representation
 func (r Result) Map() map[string]Result {
-	if r.Type == JSONTypeNull {
-		return map[string]Result{}
-	}
-	if !r.IsObject() {
-		return map[string]Result{}
-	}
-
 	results := make(map[string]Result)
 	for _, kv := range r.MapKVList() {
 		results[kv.Key] = kv.Value

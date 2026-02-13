@@ -354,10 +354,11 @@ func (e *Evaluator) evalQuerySegments(currentNode Result, relative bool, segment
 	for _, seg := range segments {
 		var newResults []Result
 		for _, r := range results {
-			if seg.Type == SingularNameSegment {
+			switch seg.Type {
+			case SingularNameSegment:
 				selected := e.evalNameSelector(r, seg.Name)
 				newResults = append(newResults, selected...)
-			} else if seg.Type == SingularIndexSegment {
+			case SingularIndexSegment:
 				selected := e.evalIndexSelector(r, seg.Index)
 				newResults = append(newResults, selected...)
 			}

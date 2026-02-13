@@ -727,6 +727,16 @@ func (p *Parser) isValidFunctionName(name string) bool {
 	return true
 }
 
+// function-name-first = LCALPHA
+func isFunctionNameFirst(r rune) bool {
+	return (r >= 'a' && r <= 'z')
+}
+
+// function-name-char = function-name-first / DIGIT / "_"
+func isFunctionNameChar(r rune) bool {
+	return isFunctionNameFirst(r) || (r >= '0' && r <= '9') || r == '_'
+}
+
 func (p *Parser) parseFuncArg() (*FuncArg, error) {
 	switch p.curr.Type {
 	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
@@ -762,33 +772,24 @@ func (p *Parser) parseFuncArgRootOrCurrent() (*FuncArg, error) {
 	}
 
 	switch p.curr.Type {
-	case TokenLAnd:
+	case TokenLAnd, TokenLOr:
+		op := p.curr.Type
 		p.advance()
-		right, err := p.parseLogicalExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &FuncArg{
-			LogicalExpr: &FilterExpr{
-				Type: FilterLogicalAnd,
-				Left: &FilterExpr{
-					Test: &TestExpr{
-						FilterQuery: query,
-					},
-				},
-				Right: right,
-			},
-		}, nil
 
-	case TokenLOr:
-		p.advance()
 		right, err := p.parseLogicalExpr()
 		if err != nil {
 			return nil, err
 		}
+		var filterType FilterExprType
+		switch op {
+		case TokenLAnd:
+			filterType = FilterLogicalAnd
+		case TokenLOr:
+			filterType = FilterLogicalOr
+		}
 		return &FuncArg{
 			LogicalExpr: &FilterExpr{
-				Type: FilterLogicalOr,
+				Type: filterType,
 				Left: &FilterExpr{
 					Test: &TestExpr{
 						FilterQuery: query,
