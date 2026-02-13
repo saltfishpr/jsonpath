@@ -110,6 +110,11 @@ func (r Result) IsArray() bool {
 	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '['
 }
 
+// IsString checks if the result is a string
+func (r Result) IsString() bool {
+	return r.Type == JSONTypeString
+}
+
 // IsBool checks if the result is a boolean
 func (r Result) IsBool() bool {
 	return r.Type == JSONTypeTrue || r.Type == JSONTypeFalse
@@ -254,6 +259,10 @@ func (r Result) MapKVList() []KV {
 			break
 		}
 		key, value, next := parseObjectMember(r.Raw, i)
+		// Stop parsing on invalid JSON to prevent infinite loop
+		if key == "" {
+			break
+		}
 		results = append(results, KV{Key: key, Value: value})
 		i = next
 

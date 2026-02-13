@@ -117,6 +117,18 @@ color := bicycle.Get("$.color")
 fmt.Println(color.String()) // red
 ```
 
+### 函数支持
+
+支持以下 RFC 9535 标准函数：
+
+| 函数                     | 说明                                     | 示例                        |
+| ------------------------ | ---------------------------------------- | --------------------------- |
+| `length(value)`          | 返回字符串长度/数组元素个数/对象属性个数 | `length(@.title)`           |
+| `count(nodes)`           | 统计节点数量                             | `count(@.price[?(@ > 10)])` |
+| `match(value, pattern)`  | 完全匹配正则表达式                       | `match(@.category, "^ref")` |
+| `search(value, pattern)` | 搜索正则表达式                           | `search(@.title, "Of")`     |
+| `value(nodes)`           | 从节点提取单个值                         | `value(@..isbn)`            |
+
 ## JSONPath 语法示例
 
 | 表达式                   | 描述                   |

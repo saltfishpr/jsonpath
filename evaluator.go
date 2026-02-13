@@ -311,8 +311,11 @@ func (e *Evaluator) evalComparable(currentNode Result, c *Comparable) Result {
 	case ComparableSingularQuery:
 		return e.evalSingularQuery(currentNode, c.SingularQuery)
 	case ComparableFuncExpr:
-		result, _ := e.evalFuncCall(currentNode, c.FuncExpr, ContextComparable)
-		return result
+		result, err := e.evalFuncCall(currentNode, c.FuncExpr, FunctionValueTypeValue)
+		if err != nil {
+			return Result{}
+		}
+		return result.(Result)
 	}
 	return Result{}
 }
@@ -376,14 +379,17 @@ func (e *Evaluator) evalTestExpr(currentNode Result, test *TestExpr) bool {
 		return e.evalFilterQueryTest(currentNode, test.FilterQuery)
 	}
 	if test.FuncExpr != nil {
-		result, ok := e.evalFuncCall(currentNode, test.FuncExpr, ContextTest)
-		if !ok {
+		result, err := e.evalFuncCall(currentNode, test.FuncExpr, FunctionValueTypeLogical)
+		if err != nil {
 			return false
 		}
-		// Convert LogicalType or NodesType result to logical value
-		// LogicalType: existence means true
-		// NodesType: non-empty means true
-		return e.funcResultToLogical(result)
+		if logical, ok := result.(bool); ok {
+			return logical
+		}
+		if nodes, ok := result.([]Result); ok {
+			return len(nodes) > 0
+		}
+		return false
 	}
 	return false
 }
@@ -449,17 +455,4 @@ func (e *Evaluator) compareLess(a, b Result) bool {
 		return a.Str < b.Str
 	}
 	return false
-}
-
-func (e *Evaluator) funcResultToLogical(result Result) bool {
-	if !result.Exists() {
-		return false
-	}
-	if result.Type == JSONTypeTrue {
-		return true
-	}
-	if result.Type == JSONTypeFalse {
-		return false
-	}
-	return true
 }

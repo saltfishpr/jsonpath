@@ -1,395 +1,126 @@
 package jsonpath
 
 import (
-	"regexp"
-	"strconv"
+	"fmt"
 )
 
-// FuncResultType is the return type of a function
-type FuncResultType int
+// FunctionValueType 表示函数参数/返回值的类型
+type FunctionValueType int
 
 const (
-	ResultTypeValueType FuncResultType = iota
-	ResultTypeLogicalType
-	ResultTypeNodesType
+	FunctionValueTypeValue   FunctionValueType = iota // Result / Noting
+	FunctionValueTypeLogical                          // true/false
+	FunctionValueTypeNodes                            // []Result
 )
 
-// FuncParamType is the parameter type of a function
-type FuncParamType int
+// String 返回类型的字符串表示
+func (t FunctionValueType) String() string {
+	switch t {
+	case FunctionValueTypeValue:
+		return "ValueType"
+	case FunctionValueTypeLogical:
+		return "LogicalType"
+	case FunctionValueTypeNodes:
+		return "NodesType"
+	default:
+		return "Unknown"
+	}
+}
 
-const (
-	ParamTypeValueType FuncParamType = iota
-	ParamTypeLogicalType
-	ParamTypeNodesType
-)
+var FunctionValueNothing = Result{}
 
-// FuncSignature defines a function's signature
-type FuncSignature struct {
+// FunctionSignature 定义函数签名
+type FunctionSignature struct {
 	Name       string
-	ParamTypes []FuncParamType
-	ReturnType FuncResultType
+	ParamTypes []FunctionValueType
+	ReturnType FunctionValueType
+	Handler    func(args []interface{}) (interface{}, error)
 }
 
-// FuncContext is the context where a function is called
-type FuncContext int
+// 函数注册表
+var functionRegistry = map[string]FunctionSignature{}
 
-const (
-	ContextComparable FuncContext = iota // As part of comparison expression
-	ContextTest                          // As test expression
-	ContextArgument                      // As function argument
-)
-
-// builtinSignatures contains signatures for built-in functions
-var builtinSignatures = map[string]*FuncSignature{
-	"length": {Name: "length", ParamTypes: []FuncParamType{ParamTypeValueType}, ReturnType: ResultTypeValueType},
-	"count":  {Name: "count", ParamTypes: []FuncParamType{ParamTypeNodesType}, ReturnType: ResultTypeValueType},
-	"match":  {Name: "match", ParamTypes: []FuncParamType{ParamTypeValueType, ParamTypeValueType}, ReturnType: ResultTypeLogicalType},
-	"search": {Name: "search", ParamTypes: []FuncParamType{ParamTypeValueType, ParamTypeValueType}, ReturnType: ResultTypeLogicalType},
-	"value":  {Name: "value", ParamTypes: []FuncParamType{ParamTypeNodesType}, ReturnType: ResultTypeValueType},
+// init 注册所有标准函数
+func init() {
+	registerLength()
+	registerCount()
+	registerMatch()
+	registerSearch()
+	registerValue()
 }
 
-// logicalResult converts a bool to Result (LogicalTrue/LogicalFalse)
-func (e *Evaluator) logicalResult(value bool) Result {
-	if value {
-		return Result{Type: JSONTypeTrue, Raw: "true"}
+func (e *Evaluator) evalFuncCall(currentNode Result, fn *FuncCall, expectedType FunctionValueType) (interface{}, error) {
+	sig, exists := functionRegistry[fn.Name]
+	if !exists {
+		return nil, fmt.Errorf("unknown function: %s", fn.Name)
 	}
-	return Result{Type: JSONTypeFalse, Raw: "false"}
-}
 
-// evalFuncResult holds the result of evaluating a function argument
-type evalFuncResult struct {
-	value      Result   // ValueType result
-	logical    bool     // LogicalType result
-	nodes      []Result // NodesType result
-	resultType FuncResultType
-	isNothing  bool // Whether result is Nothing
-}
-
-// findFunctionSignature finds a function's signature (builtin or custom)
-func (e *Evaluator) findFunctionSignature(name string) *FuncSignature {
-	if sig, ok := builtinSignatures[name]; ok {
-		return sig
-	}
-	return nil
-}
-
-// checkFunctionWellTyped checks if function call matches signature
-func (e *Evaluator) checkFunctionWellTyped(fn *FuncCall, sig *FuncSignature, context FuncContext) bool {
 	if len(fn.Args) != len(sig.ParamTypes) {
-		return false
+		return nil, fmt.Errorf("%s() expects %d arguments, got %d",
+			fn.Name, len(sig.ParamTypes), len(fn.Args))
 	}
 
-	switch context {
-	case ContextTest:
-		// As test-expr: return must be LogicalType or NodesType
-		if sig.ReturnType != ResultTypeLogicalType && sig.ReturnType != ResultTypeNodesType {
-			return false
-		}
-	case ContextComparable:
-		// As comparable: return must be ValueType
-		if sig.ReturnType != ResultTypeValueType {
-			return false
-		}
-	case ContextArgument:
-		// As argument: checked by caller
-	}
-
-	return true
-}
-
-func (e *Evaluator) evalFuncArgs(currentNode Result, fn *FuncCall, sig *FuncSignature) ([]evalFuncResult, bool) {
-	args := make([]evalFuncResult, len(fn.Args))
-
+	args := make([]interface{}, len(fn.Args))
 	for i, arg := range fn.Args {
-		paramType := sig.ParamTypes[i]
-		result, ok := e.evalFuncArg(currentNode, arg, paramType)
-		if !ok {
-			return nil, false
+		val, err := e.evalFuncArg(currentNode, arg, sig.ParamTypes[i])
+		if err != nil {
+			return nil, fmt.Errorf("argument %d of %s(): %w", i+1, fn.Name, err)
 		}
-		args[i] = result
+		args[i] = val
 	}
-	return args, true
+
+	return sig.Handler(args)
 }
 
-func (e *Evaluator) evalFuncArg(currentNode Result, arg *FuncArg, expectedType FuncParamType) (evalFuncResult, bool) {
+func (e *Evaluator) evalFuncArg(currentNode Result, arg *FuncArg, expectedType FunctionValueType) (interface{}, error) {
 	switch arg.Type {
 	case FuncArgLiteral:
-		return e.evalLiteralArg(arg.Literal, expectedType)
+		// 字面量只能是 ValueType
+		if expectedType != FunctionValueTypeValue {
+			return nil, fmt.Errorf("literal cannot be converted to %s", expectedType)
+		}
+		return e.evalLiteral(arg.Literal), nil
+
 	case FuncArgFilterQuery:
-		return e.evalFilterQueryArg(currentNode, arg.FilterQuery, expectedType)
+		nodes := e.evalFilterQuery(currentNode, arg.FilterQuery)
+		switch expectedType {
+		case FunctionValueTypeValue:
+			if len(nodes) == 1 {
+				return nodes[0], nil
+			}
+			return FunctionValueNothing, nil
+		case FunctionValueTypeLogical:
+			return len(nodes) > 0, nil
+		case FunctionValueTypeNodes:
+			return nodes, nil
+		default:
+			return nil, fmt.Errorf("cannot convert nodes to %s", expectedType)
+		}
+
 	case FuncArgLogicalExpr:
-		return e.evalLogicalExprArg(currentNode, arg.LogicalExpr, expectedType)
+		if expectedType != FunctionValueTypeLogical {
+			return nil, fmt.Errorf("logical expression cannot be converted to %s", expectedType)
+		}
+		return e.evalFilterExpr(currentNode, arg.LogicalExpr), nil
+
 	case FuncArgFuncExpr:
-		return e.evalFuncExprArg(currentNode, arg.FuncExpr, expectedType)
-	}
-	return evalFuncResult{}, false
-}
-
-func (e *Evaluator) evalLiteralArg(lit *LiteralValue, expectedType FuncParamType) (evalFuncResult, bool) {
-	switch expectedType {
-	case ParamTypeValueType:
-		return evalFuncResult{
-			value:      e.evalLiteral(lit),
-			resultType: ResultTypeValueType,
-			isNothing:  false,
-		}, true
-	case ParamTypeLogicalType:
-		return evalFuncResult{}, false
-	case ParamTypeNodesType:
-		return evalFuncResult{}, false
-	}
-	return evalFuncResult{}, false
-}
-
-func (e *Evaluator) evalFilterQueryArg(currentNode Result, fq *FilterQuery, expectedType FuncParamType) (evalFuncResult, bool) {
-	results := e.evalFilterQuery(currentNode, fq)
-
-	switch expectedType {
-	case ParamTypeValueType:
-		if len(results) == 0 {
-			return evalFuncResult{isNothing: true, resultType: ResultTypeValueType}, true
+		fn := arg.FuncExpr
+		sig, exists := functionRegistry[fn.Name]
+		if !exists {
+			return nil, fmt.Errorf("unknown function: %s", fn.Name)
 		}
-		if len(results) == 1 {
-			return evalFuncResult{
-				value:      results[0],
-				resultType: ResultTypeValueType,
-				isNothing:  false,
-			}, true
+		// 嵌套函数调用：期望类型必须与嵌套函数的返回类型匹配
+		resultAny, err := e.evalFuncCall(currentNode, fn, sig.ReturnType)
+		if err != nil {
+			return nil, err
 		}
-		// Multiple nodes return Nothing (RFC 9535)
-		return evalFuncResult{isNothing: true, resultType: ResultTypeValueType}, true
-	case ParamTypeNodesType:
-		return evalFuncResult{
-			nodes:      results,
-			resultType: ResultTypeNodesType,
-			isNothing:  false,
-		}, true
-	case ParamTypeLogicalType:
-		logical := len(results) > 0
-		return evalFuncResult{
-			logical:    logical,
-			resultType: ResultTypeLogicalType,
-			isNothing:  false,
-		}, true
-	}
-	return evalFuncResult{}, false
-}
-
-func (e *Evaluator) evalLogicalExprArg(currentNode Result, expr *FilterExpr, expectedType FuncParamType) (evalFuncResult, bool) {
-	if expectedType != ParamTypeLogicalType {
-		return evalFuncResult{}, false
-	}
-
-	logical := e.evalFilterExpr(currentNode, expr)
-	return evalFuncResult{
-		logical:    logical,
-		resultType: ResultTypeLogicalType,
-		isNothing:  false,
-	}, true
-}
-
-func (e *Evaluator) evalFuncExprArg(currentNode Result, fn *FuncCall, expectedType FuncParamType) (evalFuncResult, bool) {
-	result, ok := e.evalFuncCall(currentNode, fn, ContextArgument)
-	if !ok {
-		return evalFuncResult{}, false
-	}
-
-	sig := e.findFunctionSignature(fn.Name)
-	if sig == nil {
-		return evalFuncResult{}, false
-	}
-
-	switch sig.ReturnType {
-	case ResultTypeValueType:
-		if expectedType == ParamTypeValueType {
-			return evalFuncResult{
-				value:      result,
-				resultType: ResultTypeValueType,
-				isNothing:  !result.Exists(),
-			}, true
+		// 类型兼容性检查
+		if expectedType != sig.ReturnType {
+			return nil, fmt.Errorf("type mismatch: %s() returns %s but %s is expected", fn.Name, sig.ReturnType, expectedType)
 		}
-	case ResultTypeLogicalType:
-		if expectedType == ParamTypeLogicalType {
-			logical := result.Exists() && result.Type != JSONTypeNull && result.Type != JSONTypeFalse
-			return evalFuncResult{
-				logical:    logical,
-				resultType: ResultTypeLogicalType,
-				isNothing:  false,
-			}, true
-		}
-	case ResultTypeNodesType:
-		if expectedType == ParamTypeNodesType {
-			return evalFuncResult{}, false
-		}
-		if expectedType == ParamTypeLogicalType {
-			logical := result.Exists()
-			return evalFuncResult{
-				logical:    logical,
-				resultType: ResultTypeLogicalType,
-				isNothing:  false,
-			}, true
-		}
-	}
+		return resultAny, nil
 
-	return evalFuncResult{}, false
-}
-
-// evalFuncCall evaluates a function call
-func (e *Evaluator) evalFuncCall(currentNode Result, fn *FuncCall, context FuncContext) (Result, bool) {
-	sig := e.findFunctionSignature(fn.Name)
-	if sig == nil {
-		return Result{}, false
-	}
-
-	if !e.checkFunctionWellTyped(fn, sig, context) {
-		return Result{}, false
-	}
-
-	args, ok := e.evalFuncArgs(currentNode, fn, sig)
-	if !ok {
-		return Result{}, false
-	}
-
-	return e.callFunction(fn.Name, args, sig)
-}
-
-// callFunction calls a function implementation
-func (e *Evaluator) callFunction(name string, args []evalFuncResult, sig *FuncSignature) (Result, bool) {
-	switch name {
-	case "length":
-		return e.builtinLength(args)
-	case "count":
-		return e.builtinCount(args)
-	case "match":
-		return e.builtinMatch(args)
-	case "search":
-		return e.builtinSearch(args)
-	case "value":
-		return e.builtinValue(args)
-	}
-
-	return Result{}, false
-}
-
-// builtinLength implements the length() function
-func (e *Evaluator) builtinLength(args []evalFuncResult) (Result, bool) {
-	if len(args) != 1 {
-		return Result{}, false
-	}
-	arg := args[0]
-
-	if arg.isNothing {
-		return Result{}, true
-	}
-
-	if arg.resultType != ResultTypeValueType {
-		return Result{}, false
-	}
-
-	v := arg.value
-	var length int
-
-	switch {
-	case v.IsArray():
-		length = len(v.Array())
-	case v.IsObject():
-		length = len(v.Map())
-	case v.Type == JSONTypeString:
-		length = len(v.Str)
 	default:
-		return Result{}, true
+		return nil, fmt.Errorf("unknown function argument type")
 	}
-
-	return Result{
-		Type: JSONTypeNumber,
-		Num:  float64(length),
-		Raw:  strconv.Itoa(length),
-	}, true
-}
-
-// builtinCount implements the count() function
-func (e *Evaluator) builtinCount(args []evalFuncResult) (Result, bool) {
-	if len(args) != 1 {
-		return Result{}, false
-	}
-	arg := args[0]
-
-	if arg.resultType != ResultTypeNodesType {
-		return Result{}, false
-	}
-
-	count := len(arg.nodes)
-	return Result{
-		Type: JSONTypeNumber,
-		Num:  float64(count),
-		Raw:  strconv.Itoa(count),
-	}, true
-}
-
-// builtinMatch implements the match() function
-func (e *Evaluator) builtinMatch(args []evalFuncResult) (Result, bool) {
-	input, pattern, ok := e.checkTwoStringArgs(args)
-	if !ok {
-		return e.logicalResult(false), true
-	}
-
-	re, err := regexp.Compile("^" + pattern + "$")
-	if err != nil {
-		return e.logicalResult(false), true
-	}
-
-	matched := re.MatchString(input)
-	return e.logicalResult(matched), true
-}
-
-// checkTwoStringArgs verifies both args are strings
-func (e *Evaluator) checkTwoStringArgs(args []evalFuncResult) (string, string, bool) {
-	if len(args) != 2 {
-		return "", "", false
-	}
-
-	input := args[0]
-	if input.isNothing || input.resultType != ResultTypeValueType || input.value.Type != JSONTypeString {
-		return "", "", false
-	}
-
-	pattern := args[1]
-	if pattern.isNothing || pattern.resultType != ResultTypeValueType || pattern.value.Type != JSONTypeString {
-		return "", "", false
-	}
-
-	return input.value.Str, pattern.value.Str, true
-}
-
-// builtinSearch implements the search() function
-func (e *Evaluator) builtinSearch(args []evalFuncResult) (Result, bool) {
-	input, pattern, ok := e.checkTwoStringArgs(args)
-	if !ok {
-		return e.logicalResult(false), true
-	}
-
-	re, err := regexp.Compile(pattern)
-	if err != nil {
-		return e.logicalResult(false), true
-	}
-
-	matched := re.MatchString(input)
-	return e.logicalResult(matched), true
-}
-
-// builtinValue implements the value() function
-func (e *Evaluator) builtinValue(args []evalFuncResult) (Result, bool) {
-	if len(args) != 1 {
-		return Result{}, false
-	}
-	arg := args[0]
-
-	if arg.resultType != ResultTypeNodesType {
-		return Result{}, false
-	}
-
-	if len(arg.nodes) == 1 {
-		return arg.nodes[0], true
-	}
-	return Result{}, true
 }
