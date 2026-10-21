@@ -10,6 +10,9 @@ type expressionResult struct {
 }
 
 func (c *evalContext) logical(e *expression, n *jsonNode) bool {
+	if e.kind == 'q' && e.path.singular() {
+		return c.singular(e.path, n) != nil
+	}
 	r := c.expression(e, n)
 	if r.typ == nodesType {
 		return len(r.nodes) > 0
@@ -17,6 +20,9 @@ func (c *evalContext) logical(e *expression, n *jsonNode) bool {
 	return r.logical
 }
 func (c *evalContext) value(e *expression, n *jsonNode) *jsonNode {
+	if e.kind == 'q' && e.path.singular() {
+		return c.singular(e.path, n)
+	}
 	r := c.expression(e, n)
 	if r.typ == nodesType {
 		if len(r.nodes) == 1 {
@@ -53,24 +59,29 @@ func (c *evalContext) expression(e *expression, n *jsonNode) expressionResult {
 	case 'c':
 		r.typ = logicalType
 		a, b := c.value(e.left, n), c.value(e.right, n)
-		equal := equalValues(a, b)
-		less, greater := false, false
-		if a != nil && b != nil && a.kind == b.kind {
+		if e.name == "==" || e.name == "!=" {
+			r.logical = equalValues(a, b)
+			if e.name == "!=" {
+				r.logical = !r.logical
+			}
+			return r
+		}
+		equal, less, greater := false, false, false
+		ordered := a != nil && b != nil && a.kind == b.kind &&
+			(a.kind == numberKind || a.kind == stringKind)
+		if ordered {
 			var cmp int
-			switch a.kind {
-			case numberKind:
+			if a.kind == numberKind {
 				cmp = compareNumber(a.number, b.number)
-			case stringKind:
+			} else {
 				cmp = strings.Compare(a.text, b.text)
 			}
-			less = cmp < 0
-			greater = cmp > 0
+			equal, less, greater = cmp == 0, cmp < 0, cmp > 0
+		} else if e.name == "<=" || e.name == ">=" {
+			// Equality also applies to Nothing, null, booleans and containers.
+			equal = equalValues(a, b)
 		}
 		switch e.name {
-		case "==":
-			r.logical = equal
-		case "!=":
-			r.logical = !equal
 		case "<":
 			r.logical = less
 		case ">":

@@ -25,17 +25,27 @@ func hex(c byte) int {
 func readString(s string, pos *int) (string, error) {
 	quote := s[*pos]
 	*pos++
+	start := *pos
 	var b strings.Builder
+	escaped := false
 	for *pos < len(s) {
 		c := s[*pos]
 		*pos++
 		if c == quote {
+			if !escaped {
+				return s[start : *pos-1], nil
+			}
 			return b.String(), nil
 		}
 		if c < 0x20 {
 			return "", fmt.Errorf("unescaped control character")
 		}
 		if c == '\\' {
+			if !escaped {
+				// Ordinary strings can share the immutable source after validation.
+				b.WriteString(s[start : *pos-1])
+				escaped = true
+			}
 			if *pos == len(s) {
 				break
 			}
@@ -91,14 +101,18 @@ func readString(s string, pos *int) (string, error) {
 				return "", fmt.Errorf("invalid escape")
 			}
 		} else if c < utf8.RuneSelf {
-			b.WriteByte(c)
+			if escaped {
+				b.WriteByte(c)
+			}
 		} else {
 			*pos--
 			r, n := utf8.DecodeRuneInString(s[*pos:])
 			if r == utf8.RuneError && n == 1 {
 				return "", fmt.Errorf("invalid UTF-8")
 			}
-			b.WriteRune(r)
+			if escaped {
+				b.WriteRune(r)
+			}
 			*pos += n
 		}
 	}

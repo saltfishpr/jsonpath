@@ -8,7 +8,45 @@ type evalContext struct {
 	regex map[string]*iregexp.Pattern
 }
 
+// singular evaluates a path already checked by pathExpr.singular without a nodelist.
+func (c *evalContext) singular(p pathExpr, current *jsonNode) *jsonNode {
+	if c.err != nil {
+		return nil
+	}
+	if p.root {
+		current = c.root
+	}
+	for _, seg := range p.segments {
+		if current == nil {
+			return nil
+		}
+		s := seg.selectors[0]
+		if s.kind == 'n' {
+			current = current.members[s.name]
+			continue
+		}
+		if current.kind != arrayKind {
+			return nil
+		}
+		i := s.index
+		if i < 0 {
+			i += int64(len(current.children))
+		}
+		if i < 0 || i >= int64(len(current.children)) {
+			return nil
+		}
+		current = current.children[int(i)]
+	}
+	return current
+}
+
 func (c *evalContext) path(p pathExpr, current *jsonNode) []*jsonNode {
+	if p.singular() {
+		if n := c.singular(p, current); n != nil {
+			return []*jsonNode{n}
+		}
+		return nil
+	}
 	if p.root {
 		current = c.root
 	}
