@@ -65,36 +65,9 @@ func readString(s string, pos *int) (string, error) {
 			case 't':
 				b.WriteByte('\t')
 			case 'u':
-				readHex := func() (rune, error) {
-					var r rune
-					for j := 0; j < 4; j++ {
-						if *pos >= len(s) || hex(s[*pos]) < 0 {
-							return 0, fmt.Errorf("invalid Unicode escape")
-						}
-						r = r*16 + rune(hex(s[*pos]))
-						*pos++
-					}
-					return r, nil
-				}
-				r, err := readHex()
+				r, err := readUnicodeEscape(s, pos)
 				if err != nil {
 					return "", err
-				}
-				if r >= 0xD800 && r <= 0xDBFF {
-					if *pos+2 > len(s) || s[*pos:*pos+2] != "\\u" {
-						return "", fmt.Errorf("unpaired high surrogate")
-					}
-					*pos += 2
-					low, err := readHex()
-					if err != nil {
-						return "", err
-					}
-					if low < 0xDC00 || low > 0xDFFF {
-						return "", fmt.Errorf("invalid surrogate pair")
-					}
-					r = 0x10000 + (r-0xD800)*0x400 + low - 0xDC00
-				} else if r >= 0xDC00 && r <= 0xDFFF {
-					return "", fmt.Errorf("unpaired low surrogate")
 				}
 				b.WriteRune(r)
 			default:
@@ -117,4 +90,42 @@ func readString(s string, pos *int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("unterminated string")
+}
+
+func readUnicodeEscape(s string, pos *int) (rune, error) {
+	r, err := readHex4(s, pos)
+	if err != nil {
+		return 0, err
+	}
+	switch {
+	case r >= 0xD800 && r <= 0xDBFF:
+		if *pos+2 > len(s) || s[*pos:*pos+2] != "\\u" {
+			return 0, fmt.Errorf("unpaired high surrogate")
+		}
+		*pos += 2
+		low, err := readHex4(s, pos)
+		if err != nil {
+			return 0, err
+		}
+		if low < 0xDC00 || low > 0xDFFF {
+			return 0, fmt.Errorf("invalid surrogate pair")
+		}
+		return 0x10000 + (r-0xD800)*0x400 + low - 0xDC00, nil
+	case r >= 0xDC00 && r <= 0xDFFF:
+		return 0, fmt.Errorf("unpaired low surrogate")
+	default:
+		return r, nil
+	}
+}
+
+func readHex4(s string, pos *int) (rune, error) {
+	var r rune
+	for j := 0; j < 4; j++ {
+		if *pos >= len(s) || hex(s[*pos]) < 0 {
+			return 0, fmt.Errorf("invalid Unicode escape")
+		}
+		r = r*16 + rune(hex(s[*pos]))
+		*pos++
+	}
+	return r, nil
 }
