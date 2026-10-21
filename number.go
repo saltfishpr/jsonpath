@@ -1,6 +1,7 @@
 package jsonpath
 
 import (
+	"math"
 	"math/big"
 	"strings"
 )
@@ -58,11 +59,26 @@ func compareNumber(a, b decimal) int {
 	if b.digits == "0" {
 		return sign
 	}
-	var x, y big.Int
-	x.Add(&a.exponent, big.NewInt(int64(len(a.digits))))
-	y.Add(&b.exponent, big.NewInt(int64(len(b.digits))))
-	if c := x.Cmp(&y); c != 0 {
-		return sign * c
+	x, y := a.exponent.Int64(), b.exponent.Int64()
+	alen, blen := int64(len(a.digits)), int64(len(b.digits))
+	// Digit counts are positive, so only upper overflow needs checking.
+	if a.exponent.IsInt64() && b.exponent.IsInt64() &&
+		x <= math.MaxInt64-alen && y <= math.MaxInt64-blen {
+		x += alen
+		y += blen
+		if x < y {
+			return -sign
+		}
+		if x > y {
+			return sign
+		}
+	} else {
+		var x, y big.Int
+		x.Add(&a.exponent, big.NewInt(alen))
+		y.Add(&b.exponent, big.NewInt(blen))
+		if c := x.Cmp(&y); c != 0 {
+			return sign * c
+		}
 	}
 	n := len(a.digits)
 	if len(b.digits) > n {
