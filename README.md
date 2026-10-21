@@ -68,55 +68,101 @@ GOOS=linux GOARCH=386 go test -c -o /tmp/jsonpath-linux-386.test .
 
 ## 性能测试
 
-运行全部 benchmark（编译、解析及 14 种查询场景）：
+benchmark 分别测量查询编译（`Compile`）、JSON 解析（`Parse`）和查询求值（`Values`）三个阶段，共 59 个用例。运行全部用例：
 
 ```sh
-go test -run '^$' -bench . -benchmem -benchtime=100ms -count=3
+go test -run '^$' -bench '^Benchmark(Compile|Parse|Query)$' -benchmem -benchtime=1s -count=3 .
 ```
 
-以下为 Apple M4 Pro、macOS darwin/arm64、Go 1.26.1、GOMAXPROCS=14 下的实测结果。128 个 benchmark 各运行 3 次，全部通过，总耗时约 66 秒；表中各指标取 3 次结果的中位数。100ms 是短时测量，结果仅供参考；稳定对比建议使用 `-benchtime=1s -count=5`，并保持机器负载一致。这些 benchmark 为串行执行，不代表并发吞吐量。
+以下为 Apple M4 Pro、macOS darwin/arm64、Go 1.26.1、GOMAXPROCS=14 下的实测结果。每个用例运行 3 次，全部通过；表中各指标分别取 3 次结果的中位数。benchmark 串行执行，不代表并发吞吐量。
 
-测试数据由 `jsonpath_benchmark_test.go` 确定性生成，包含文档元信息和 10 或 1000 本书，每本书包含标题、价格、可用状态、作者及标签。数据生成不计入耗时。
+耗时统一使用 ns/op（1 ms = 1,000,000 ns）；B/op 和 allocs/op 分别表示每次操作分配的字节数和分配次数；解析吞吐量 MB/s 按输入字节数计算。
 
-### 编译与解析
+编译和查询使用相同的 19 种 JSONPath 表达式。解析和查询分别使用 25,000 和 100,000 本书的 JSON 数据，由 `jsonpath_benchmark_test.go` 使用固定随机种子生成，包含书籍的分类、作者、标题、ISBN、价格、库存状态、标签、0–3 条评论，以及一辆自行车。数据生成均不计时。
 
-| 操作              | 耗时（µs/op） |    B/op | allocs/op |
-| ----------------- | ------------: | ------: | --------: |
-| Compile：字段查询 |         0.092 |     288 |         5 |
-| Compile：组合过滤 |         0.485 |    1928 |        21 |
-| Compile：正则过滤 |         0.900 |    2968 |        50 |
-| Parse：10 本书    |         7.649 |   25160 |       219 |
-| Parse：1000 本书  |       814.198 | 2382234 |     20115 |
+### 查询编译
 
-### 查询
+`BenchmarkCompile` 对每种表达式重复调用 `jsonpath.Compile`，计时包含语法解析、类型检查及编译阶段的正则处理，不包含 JSON 解析和查询求值。
 
-以下均使用 1000 本书的数据。`OneShot` 调用 `QueryValues` 或 `QueryNodes`，包含编译和解析；`Reuse` 在计时前完成 Compile 和 Parse，仅测量求值及结果构造。Values 返回 JSON 片段，Nodes 额外构造 normalized path。
+| JSONPath                                                    | ns/op | B/op | allocs/op |
+| ----------------------------------------------------------- | ----: | ---: | --------: |
+| `$`                                                         | 19.14 |   64 |         1 |
+| `$.store.bicycle.color`                                     | 148.9 |  480 |         7 |
+| `$.store.book[0].title`                                     | 182.7 |  552 |         9 |
+| `$.store.book[-1].title`                                    | 185.0 |  552 |         9 |
+| `$.store.book[0:10].title`                                  | 236.5 |  560 |        10 |
+| `$.store.book[::2].title`                                   | 191.7 |  552 |         9 |
+| `$.store.book[0,1,-1].title`                                | 281.8 |  952 |        13 |
+| `$.store.book[*]`                                           | 163.5 |  480 |         7 |
+| `$.store.book[*].author`                                    | 168.1 |  544 |         8 |
+| `$..price`                                                  | 60.93 |  160 |         3 |
+| `$.store.book[*].reviews[*].rating`                         | 265.9 |  928 |        11 |
+| `$.store.book[?@.price < 10]`                               | 352.5 | 1144 |        14 |
+| `$.store.book[0].reviews[?@.rating >= 4]`                   | 439.7 | 1528 |        17 |
+| `$.store.book[?search(@.title, "Number 1")]`                |  1215 | 3408 |        57 |
+| `$.store.book[?@.price < 10 && @.in_stock == true].title`   | 539.5 | 1992 |        22 |
+| `$.store.book[?length(@.tags) == 2].title`                  | 472.0 | 1336 |        16 |
+| `$.store.book[?match(@.title, "Book Number [0-9]+")].title` |  1623 | 4864 |        82 |
+| `$.store.missing`                                           | 102.9 |  288 |         5 |
+| `$.store.book[?@.price < 0].title`                          | 338.8 | 1200 |        14 |
 
-| 场景       | 模式    | 结果   | 耗时（µs/op） |    B/op | allocs/op |
-| ---------- | ------- | ------ | ------------: | ------: | --------: |
-| 字段读取   | OneShot | Values |       812.727 | 2382554 |     20123 |
-| 字段读取   | Reuse   | Values |         0.049 |      40 |         3 |
-| 字段读取   | Reuse   | Nodes  |         0.097 |      88 |         4 |
-| 批量标题   | OneShot | Values |       819.335 | 2448939 |     21137 |
-| 批量标题   | OneShot | Nodes  |       893.081 | 2489324 |     22137 |
-| 批量标题   | Reuse   | Values |        29.750 |   66232 |      1015 |
-| 批量标题   | Reuse   | Nodes  |        78.131 |  106616 |      2015 |
-| 组合过滤   | OneShot | Values |       866.717 | 2388244 |     20203 |
-| 组合过滤   | Reuse   | Values |        37.504 |    4088 |        67 |
-| 正则过滤   | OneShot | Values |      1626.018 | 3414767 |     44860 |
-| 正则过滤   | Reuse   | Values |       721.601 | 1029573 |     24695 |
-| 递归查找   | OneShot | Values |       955.305 | 2458020 |     21141 |
-| 递归查找   | Reuse   | Values |        89.776 |   75632 |      1023 |
-| 递归查找   | Reuse   | Nodes  |       163.125 |  138417 |      2023 |
-| 过滤无匹配 | Reuse   | Values |        28.223 |      16 |         2 |
+### JSON 解析
 
-对应表达式：
+`BenchmarkParse` 复用生成的 JSON 字节数据，每次调用 `jsonpath.Parse`。计时包含输入复制和文档解析，不包含查询编译和查询求值。
 
-- 字段读取：`$.meta.total`
-- 批量标题：`$.books[*].title`
-- 组合过滤：`$.books[?@.price < 10 && @.available == true].title`
-- 正则过滤：`$.books[?match(@.title, "Book [0-9]+")].title`
-- 递归查找：`$..name`
-- 过滤无匹配：`$.books[?@.price < 0].title`
+| 书籍数量 |     ns/op |   MB/s |      B/op | allocs/op |
+| -------: | --------: | -----: | --------: | --------: |
+|   25,000 |  36065802 | 148.34 |  94047589 |    802799 |
+|  100,000 | 136982531 | 156.23 | 375946102 |   3204411 |
 
-重复查询同一文档时，复用 Query 和 Document 可以避免重复编译与解析；不需要节点路径时优先使用 Values。即使复用，结果片段仍会独立分配，批量返回和路径构造的成本不会被消除。
+### 查询求值
+
+`BenchmarkQuery` 复用已编译的 Query 和已解析的 Document，调用 `query.Values(doc)`，并在计时前校验命中数量。计时包含查询求值和结果片段复制，不包含查询编译、JSON 解析和结果数量校验，也不构建 normalized path。根节点查询会复制整个 JSON 文档，返回整本书的查询也会复制对应对象。
+
+#### 25,000 本书
+
+| JSONPath                                                    |    ns/op |     B/op | allocs/op |
+| ----------------------------------------------------------- | -------: | -------: | --------: |
+| `$`                                                         |   336216 |  5357600 |         3 |
+| `$.store.bicycle.color`                                     |    54.27 |       40 |         3 |
+| `$.store.book[0].title`                                     |    60.53 |       48 |         3 |
+| `$.store.book[-1].title`                                    |    59.83 |       56 |         3 |
+| `$.store.book[0:10].title`                                  |   503.70 |      920 |        24 |
+| `$.store.book[::2].title`                                   |   832741 |  1452888 |     12542 |
+| `$.store.book[0,1,-1].title`                                |   230.20 |      272 |        13 |
+| `$.store.book[*]`                                           |  1320385 |  6382216 |     25005 |
+| `$.store.book[*].author`                                    |  1249196 |  2209552 |     25027 |
+| `$..price`                                                  |  5608487 |  2803256 |     25046 |
+| `$.store.book[*].reviews[*].rating`                         |  6216803 |  5797648 |     38013 |
+| `$.store.book[?@.price < 10]`                               |  4142649 |  1297792 |      4630 |
+| `$.store.book[0].reviews[?@.rating >= 4]`                   |   156.10 |      120 |         8 |
+| `$.store.book[?search(@.title, "Number 1")]`                |  2499438 |  3060448 |     11133 |
+| `$.store.book[?@.price < 10 && @.in_stock == true].title`   |  2502613 |   390632 |      3760 |
+| `$.store.book[?length(@.tags) == 2].title`                  |  5195815 |  5145312 |     31257 |
+| `$.store.book[?match(@.title, "Book Number [0-9]+")].title` | 35803276 | 68012488 |   1117718 |
+| `$.store.missing`                                           |    19.77 |        0 |         0 |
+| `$.store.book[?@.price < 0].title`                          |  3051732 |       24 |         3 |
+
+#### 100,000 本书
+
+| JSONPath                                                    |     ns/op |      B/op | allocs/op |
+| ----------------------------------------------------------- | --------: | --------: | --------: |
+| `$`                                                         |   1235800 |  21405728 |         3 |
+| `$.store.bicycle.color`                                     |     55.80 |        40 |         3 |
+| `$.store.book[0].title`                                     |     66.94 |        48 |         3 |
+| `$.store.book[-1].title`                                    |     61.71 |        56 |         3 |
+| `$.store.book[0:10].title`                                  |    518.60 |       920 |        24 |
+| `$.store.book[::2].title`                                   |   7253788 |   6743800 |     50054 |
+| `$.store.book[0,1,-1].title`                                |       226 |       272 |        13 |
+| `$.store.book[*]`                                           |   5577186 |  25481016 |    100005 |
+| `$.store.book[*].author`                                    |   8334330 |   9299600 |    100033 |
+| `$..price`                                                  |  18314710 |  12193272 |    100058 |
+| `$.store.book[*].reviews[*].rating`                         |  20798896 |  21517152 |    150551 |
+| `$.store.book[?@.price < 10]`                               |  16779194 |   5083376 |     18336 |
+| `$.store.book[0].reviews[?@.rating >= 4]`                   |     99.49 |        40 |         5 |
+| `$.store.book[?search(@.title, "Number 1")]`                |  18093436 |   3062016 |     11133 |
+| `$.store.book[?@.price < 10 && @.in_stock == true].title`   |  18184241 |   1847856 |     14651 |
+| `$.store.book[?length(@.tags) == 2].title`                  |  29809409 |  20807608 |    125236 |
+| `$.store.book[?match(@.title, "Book Number [0-9]+")].title` | 151465530 | 276002501 |   4567730 |
+| `$.store.missing`                                           |     20.54 |         0 |         0 |
+| `$.store.book[?@.price < 0].title`                          |  14538698 |        24 |         3 |
