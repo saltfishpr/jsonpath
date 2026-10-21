@@ -3,6 +3,7 @@ package iregexp
 import (
 	"fmt"
 	"math/big"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -18,7 +19,11 @@ type LimitError struct {
 func (e *LimitError) Error() string { return fmt.Sprintf("%s exceeds %d", e.Resource, e.Limit) }
 
 // Pattern is a compiled immutable I-Regexp, safe for concurrent use.
-type Pattern struct{ root *node }
+type Pattern struct {
+	root      *node
+	literal   string
+	isLiteral bool
+}
 type node struct {
 	kind     byte
 	children []*node
@@ -46,12 +51,14 @@ func (p *parser) fail() {
 		p.err = fmt.Errorf("invalid I-Regexp at character %d", p.pos)
 	}
 }
+
 func (p *parser) peek() rune {
 	if p.pos == len(p.r) {
 		return -1
 	}
 	return p.r[p.pos]
 }
+
 func (p *parser) take(r rune) bool {
 	if p.peek() == r {
 		p.pos++
@@ -75,8 +82,41 @@ func Compile(s string) (*Pattern, error) {
 	if p.err != nil {
 		return nil, p.err
 	}
-	return &Pattern{n}, nil
+	re := &Pattern{root: n}
+	var literal strings.Builder
+	if n.appendLiteral(&literal) {
+		re.literal = literal.String()
+		re.isLiteral = true
+	}
+	return re, nil
 }
+
+// Inspect the validated AST so escapes and singleton character classes retain
+// their meaning without bypassing syntax validation or expanding repetitions.
+func (n *node) appendLiteral(out *strings.Builder) bool {
+	switch n.kind {
+	case 'c':
+		if n.class.negative || len(n.class.parts) != 1 {
+			return false
+		}
+		part := n.class.parts[0]
+		if part.negative || part.category != "" || part.lo != part.hi {
+			return false
+		}
+		out.WriteRune(part.lo)
+		return true
+	case 's':
+		for _, child := range n.children {
+			if !child.appendLiteral(out) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *parser) alternation() *node {
 	n := &node{kind: '|'}
 	for {
@@ -92,6 +132,7 @@ func (p *parser) alternation() *node {
 	}
 	return n
 }
+
 func (p *parser) branch() *node {
 	n := &node{kind: 's', nullable: true}
 	for p.err == nil && p.peek() != -1 && p.peek() != ')' && p.peek() != '|' {
@@ -104,6 +145,7 @@ func (p *parser) branch() *node {
 	}
 	return n
 }
+
 func (p *parser) piece() *node {
 	atom := p.atom()
 	if p.err != nil {
@@ -146,6 +188,7 @@ func (p *parser) piece() *node {
 	n.nullable = n.min.Sign() == 0 || atom.nullable
 	return n
 }
+
 func (p *parser) integer() *big.Int {
 	start := p.pos
 	for p.peek() >= '0' && p.peek() <= '9' {
@@ -159,6 +202,7 @@ func (p *parser) integer() *big.Int {
 	n.SetString(string(p.r[start:p.pos]), 10)
 	return n
 }
+
 func (p *parser) atom() *node {
 	n := &node{kind: 'c'}
 	switch r := p.peek(); r {
@@ -191,6 +235,7 @@ func (p *parser) atom() *node {
 	}
 	return n
 }
+
 func (p *parser) escape() classPart {
 	p.pos++
 	r := p.peek()
@@ -227,6 +272,7 @@ func (p *parser) escape() classPart {
 	}
 	return classPart{lo: r, hi: r}
 }
+
 func validCategory(s string) bool {
 	switch s {
 	case "L", "Ll", "Lm", "Lo", "Lt", "Lu", "M", "Mc", "Me", "Mn",
@@ -236,6 +282,7 @@ func validCategory(s string) bool {
 	}
 	return false
 }
+
 func (p *parser) classChar() classPart {
 	if p.peek() == '\\' {
 		return p.escape()
@@ -248,6 +295,7 @@ func (p *parser) classChar() classPart {
 	p.pos++
 	return classPart{lo: r, hi: r}
 }
+
 func (p *parser) class() characterClass {
 	c := characterClass{negative: p.take('^')}
 	if p.take('-') {

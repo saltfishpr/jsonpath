@@ -39,6 +39,7 @@ func parseDecimal(s string) decimal {
 	d.digits = s
 	return d
 }
+
 func compareNumber(a, b decimal) int {
 	if a.digits == "0" && b.digits == "0" {
 		return 0

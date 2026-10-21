@@ -2,90 +2,88 @@ package jsonpath_test
 
 import (
 	"fmt"
+	"math"
+	"math/rand"
 	"strings"
 	"testing"
 
 	"github.com/saltfishpr/jsonpath"
 )
 
-// Keep fixtures deterministic and build them outside the timed regions.
-func benchmarkDocument(size int) []byte {
+func benchmarkDocument(size int) ([]byte, map[string]int) {
+	rng := rand.New(rand.NewSource(int64(0xC0FFEE ^ size)))
+	categories := []string{"reference", "fiction", "biography", "technical", "poetry"}
+	tags := []string{"sale", "new", "rare", "signed", "used"}
+	counts := map[string]int{
+		"child":            1,
+		"author_wildcard":  size,
+		"descendant_price": size + 1,
+	}
 	var out strings.Builder
-	out.WriteString(`{"meta":{"total":`)
-	fmt.Fprintf(&out, `%d},"books":[`, size)
+	out.WriteString(`{"store":{"book":[`)
 	for i := 0; i < size; i++ {
 		if i > 0 {
 			out.WriteByte(',')
 		}
-		fmt.Fprintf(&out, `{"title":"Book %d","price":%d,"available":%t,"author":{"name":"Author %d"},"tags":["fiction","paperback"]}`, i, i%100, i%2 == 0, i%10)
+		reviewCount := rng.Intn(4)
+		author := rng.Intn(500) + 1
+		title := fmt.Sprintf("Book Number %d", i)
+		isbn := fmt.Sprintf("%d-%d-%06d-%d", rng.Intn(10), rng.Intn(900)+100, i, rng.Intn(10))
+		price := math.RoundToEven((1+rng.Float64()*49)*100) / 100
+		inStock := rng.Float64() > 0.2
+		fmt.Fprintf(&out, `{"category":%q,"author":"Author %d","title":%q,"isbn":%q,"price":%.2f,"in_stock":%t,"tags":[`, categories[i%len(categories)], author, title, isbn, price, inStock)
+		tagCount := rng.Intn(4)
+		selection := rng.Perm(len(tags))
+		for j := 0; j < tagCount; j++ {
+			if j > 0 {
+				out.WriteByte(',')
+			}
+			fmt.Fprintf(&out, `%q`, tags[selection[j]])
+		}
+		out.WriteString(`],"reviews":[`)
+		for j := 0; j < reviewCount; j++ {
+			if j > 0 {
+				out.WriteByte(',')
+			}
+			reviewer := rng.Intn(9999) + 1
+			rating := rng.Intn(5) + 1
+			fmt.Fprintf(&out, `{"reviewer":"User %d","rating":%d}`, reviewer, rating)
+			if i == 0 && rating >= 4 {
+				counts["filter_selective"]++
+			}
+		}
+		out.WriteString(`]}`)
+		counts["nested_wildcard"] += reviewCount
+		if price < 10 {
+			counts["filter_cheap"]++
+		}
+		if strings.Contains(title, "Number 1") {
+			counts["filter_search"]++
+		}
 	}
-	out.WriteString(`]}`)
-	return []byte(out.String())
+	out.WriteString(`],"bicycle":{"color":"red","price":399.0}}}`)
+	return []byte(out.String()), counts
 }
 
 var benchmarkQueries = []struct {
 	name string
 	expr string
-	want func(int) int
 }{
-	{"Root", `$`, func(n int) int { return 1 }},
-	{"Field", `$.meta.total`, func(n int) int { return 1 }},
-	{"NestedField", `$.books[0].author.name`, func(n int) int { return 1 }},
-	{"NegativeIndex", `$.books[-1].title`, func(n int) int { return 1 }},
-	{"Slice", `$.books[0:10].title`, func(n int) int { return 10 }},
-	{"Wildcard", `$.books[*].title`, func(n int) int { return n }},
-	{"Objects", `$.books[*]`, func(n int) int { return n }},
-	{"Filter", `$.books[?@.price < 10].title`, func(n int) int { return (n/100)*10 + minBenchmark(n%100, 10) }},
-	{"CompoundFilter", `$.books[?@.price < 10 && @.available == true].title`, func(n int) int { return (n/100)*5 + (minBenchmark(n%100, 10)+1)/2 }},
-	{"Length", `$.books[?length(@.tags) == 2].title`, func(n int) int { return n }},
-	{"Regexp", `$.books[?match(@.title, "Book [0-9]+")].title`, func(n int) int { return n }},
-	{"Descendant", `$..name`, func(n int) int { return n }},
-	{"MissingField", `$.meta.missing`, func(n int) int { return 0 }},
-	{"NoFilterMatches", `$.books[?@.price < 0].title`, func(n int) int { return 0 }},
+	{"child", `$.store.book[0].title`},
+	{"author_wildcard", `$.store.book[*].author`},
+	{"descendant_price", `$..price`},
+	{"nested_wildcard", `$.store.book[*].reviews[*].rating`},
+	{"filter_cheap", `$.store.book[?@.price < 10]`},
+	{"filter_selective", `$.store.book[0].reviews[?@.rating >= 4]`},
+	{"filter_search", `$.store.book[?search(@.title, "Number 1")]`},
 }
 
-func minBenchmark(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func BenchmarkCompile(b *testing.B) {
-	for _, tc := range benchmarkQueries {
-		b.Run(tc.name, func(b *testing.B) {
-			b.ReportAllocs()
-			for i := 0; i < b.N; i++ {
-				if _, err := jsonpath.Compile(tc.expr); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
-func BenchmarkParse(b *testing.B) {
-	for _, size := range []int{10, 1000} {
-		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
-			data := benchmarkDocument(size)
-			b.ReportAllocs()
-			b.SetBytes(int64(len(data)))
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if _, err := jsonpath.Parse(data); err != nil {
-					b.Fatal(err)
-				}
-			}
-		})
-	}
-}
-
-// OneShot includes compilation and parsing; Reuse evaluates an already compiled
-// query against an already parsed document, isolating selection and result copying.
+// Exclude fixture generation, document parsing, and query compilation to match
+// upstream's eval benchmarks. Values includes this API's result-copying cost.
 func BenchmarkQuery(b *testing.B) {
-	for _, size := range []int{10, 1000} {
+	for _, size := range []int{25000, 100000} {
 		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
-			data := benchmarkDocument(size)
+			data, counts := benchmarkDocument(size)
 			doc, err := jsonpath.Parse(data)
 			if err != nil {
 				b.Fatal(err)
@@ -96,49 +94,19 @@ func BenchmarkQuery(b *testing.B) {
 					if err != nil {
 						b.Fatal(err)
 					}
-					want := tc.want(size)
-					for _, mode := range []string{"OneShot", "Reuse"} {
-						b.Run(mode, func(b *testing.B) {
-							b.Run("Values", func(b *testing.B) {
-								run := func() (int, error) {
-									if mode == "OneShot" {
-										values, err := jsonpath.QueryValues(tc.expr, data)
-										return len(values), err
-									}
-									values, err := query.Values(doc)
-									return len(values), err
-								}
-								benchmarkSelection(b, run, want)
-							})
-							b.Run("Nodes", func(b *testing.B) {
-								run := func() (int, error) {
-									if mode == "OneShot" {
-										nodes, err := jsonpath.QueryNodes(tc.expr, data)
-										return len(nodes), err
-									}
-									nodes, err := query.Nodes(doc)
-									return len(nodes), err
-								}
-								benchmarkSelection(b, run, want)
-							})
-						})
+					values, err := query.Values(doc)
+					if err != nil || len(values) != counts[tc.name] {
+						b.Fatalf("selection returned %d matches, want %d; error: %v", len(values), counts[tc.name], err)
+					}
+					b.ReportAllocs()
+					b.ResetTimer()
+					for i := 0; i < b.N; i++ {
+						if _, err := query.Values(doc); err != nil {
+							b.Fatal(err)
+						}
 					}
 				})
 			}
 		})
-	}
-}
-
-func benchmarkSelection(b *testing.B, run func() (int, error), want int) {
-	b.Helper()
-	if got, err := run(); err != nil || got != want {
-		b.Fatalf("selection returned %d matches, want %d; error: %v", got, want, err)
-	}
-	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if _, err := run(); err != nil {
-			b.Fatal(err)
-		}
 	}
 }

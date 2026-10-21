@@ -19,6 +19,7 @@ func (c *evalContext) logical(e *expression, n *jsonNode) bool {
 	}
 	return r.logical
 }
+
 func (c *evalContext) value(e *expression, n *jsonNode) *jsonNode {
 	if e.kind == 'q' && e.path.singular() {
 		return c.singular(e.path, n)
@@ -32,6 +33,7 @@ func (c *evalContext) value(e *expression, n *jsonNode) *jsonNode {
 	}
 	return r.value
 }
+
 func (c *evalContext) expression(e *expression, n *jsonNode) expressionResult {
 	r := expressionResult{typ: valueType}
 	if c.err != nil {
@@ -96,6 +98,7 @@ func (c *evalContext) expression(e *expression, n *jsonNode) expressionResult {
 	}
 	return r
 }
+
 func equalValues(a, b *jsonNode) bool {
 	if a == nil || b == nil {
 		return a == b

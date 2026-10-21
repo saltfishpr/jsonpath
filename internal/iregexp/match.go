@@ -3,7 +3,9 @@ package iregexp
 import (
 	"math/big"
 	"sort"
+	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 func categoryContains(name string, r rune) bool {
@@ -24,6 +26,7 @@ func categoryContains(name string, r rune) bool {
 	}
 	return unicode.Is(unicode.Categories[name], r)
 }
+
 func (c characterClass) contains(r rune) bool {
 	matched := false
 	for _, part := range c.parts {
@@ -62,6 +65,13 @@ func (p *Pattern) Match(s string, search bool) bool {
 	if p == nil || p.root == nil {
 		return false
 	}
+	// Invalid UTF-8 must retain the rune matcher's replacement-character semantics.
+	if p.isLiteral && utf8.ValidString(s) {
+		if search {
+			return strings.Contains(s, p.literal)
+		}
+		return s == p.literal
+	}
 	m := matcher{text: []rune(s), memo: make(map[memoKey][]int)}
 	end := 0
 	if search {
@@ -80,6 +90,7 @@ func (p *Pattern) Match(s string, search bool) bool {
 	}
 	return false
 }
+
 func unique(values []int) []int {
 	if len(values) < 2 {
 		return values
@@ -93,6 +104,7 @@ func unique(values []int) []int {
 	}
 	return out
 }
+
 func (m *matcher) apply(n *node, positions []int) []int {
 	var next []int
 	for _, pos := range positions {
@@ -100,6 +112,7 @@ func (m *matcher) apply(n *node, positions []int) []int {
 	}
 	return unique(next)
 }
+
 func same(a, b []int) bool {
 	if len(a) != len(b) {
 		return false
@@ -111,12 +124,14 @@ func same(a, b []int) bool {
 	}
 	return true
 }
+
 func bounded(n *big.Int, cap int) int {
 	if n == nil || n.Cmp(big.NewInt(int64(cap))) > 0 {
 		return cap
 	}
 	return int(n.Int64())
 }
+
 func (m *matcher) eval(n *node, start int) []int {
 	key := memoKey{n, start}
 	if cached, ok := m.memo[key]; ok {
