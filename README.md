@@ -74,7 +74,7 @@ GOOS=linux GOARCH=386 go test -c -o /tmp/jsonpath-linux-386.test .
 go test -run '^$' -bench . -benchmem -benchtime=100ms -count=3
 ```
 
-以下为 Apple M4 Pro、macOS darwin/arm64、Go 1.26.1、GOMAXPROCS=14 下的实测结果。128 个 benchmark 各运行 3 次，全部通过，总耗时约 65 秒；表中各指标取 3 次结果的中位数。100ms 是短时测量，结果仅供参考；稳定对比建议使用 `-benchtime=1s -count=5`，并保持机器负载一致。这些 benchmark 为串行执行，不代表并发吞吐量。
+以下为 Apple M4 Pro、macOS darwin/arm64、Go 1.26.1、GOMAXPROCS=14 下的实测结果。128 个 benchmark 各运行 3 次，全部通过，总耗时约 66 秒；表中各指标取 3 次结果的中位数。100ms 是短时测量，结果仅供参考；稳定对比建议使用 `-benchtime=1s -count=5`，并保持机器负载一致。这些 benchmark 为串行执行，不代表并发吞吐量。
 
 测试数据由 `jsonpath_benchmark_test.go` 确定性生成，包含文档元信息和 10 或 1000 本书，每本书包含标题、价格、可用状态、作者及标签。数据生成不计入耗时。
 
@@ -82,11 +82,11 @@ go test -run '^$' -bench . -benchmem -benchtime=100ms -count=3
 
 | 操作              | 耗时（µs/op） |    B/op | allocs/op |
 | ----------------- | ------------: | ------: | --------: |
-| Compile：字段查询 |         0.089 |     288 |         5 |
-| Compile：组合过滤 |         0.508 |    1928 |        21 |
-| Compile：正则过滤 |         1.009 |    2968 |        50 |
-| Parse：10 本书    |         7.356 |   25160 |       219 |
-| Parse：1000 本书  |       745.722 | 2382233 |     20115 |
+| Compile：字段查询 |         0.092 |     288 |         5 |
+| Compile：组合过滤 |         0.485 |    1928 |        21 |
+| Compile：正则过滤 |         0.900 |    2968 |        50 |
+| Parse：10 本书    |         7.649 |   25160 |       219 |
+| Parse：1000 本书  |       814.198 | 2382234 |     20115 |
 
 ### 查询
 
@@ -94,21 +94,21 @@ go test -run '^$' -bench . -benchmem -benchtime=100ms -count=3
 
 | 场景       | 模式    | 结果   | 耗时（µs/op） |    B/op | allocs/op |
 | ---------- | ------- | ------ | ------------: | ------: | --------: |
-| 字段读取   | OneShot | Values |       772.231 | 2382554 |     20123 |
-| 字段读取   | Reuse   | Values |         0.046 |      40 |         3 |
-| 字段读取   | Reuse   | Nodes  |         0.120 |     120 |         6 |
-| 批量标题   | OneShot | Values |       827.599 | 2448939 |     21137 |
-| 批量标题   | OneShot | Nodes  |       928.323 | 2528524 |     25037 |
-| 批量标题   | Reuse   | Values |        31.009 |   66232 |      1015 |
-| 批量标题   | Reuse   | Nodes  |       124.945 |  145817 |      4915 |
-| 组合过滤   | OneShot | Values |       847.849 | 2388242 |     20203 |
-| 组合过滤   | Reuse   | Values |        38.712 |    4088 |        67 |
-| 正则过滤   | OneShot | Values |      1467.095 | 3414767 |     44860 |
-| 正则过滤   | Reuse   | Values |       680.476 | 1029573 |     24695 |
-| 递归查找   | OneShot | Values |       894.306 | 2458020 |     21141 |
-| 递归查找   | Reuse   | Values |        82.115 |   75632 |      1023 |
-| 递归查找   | Reuse   | Nodes  |       210.502 |  212818 |      5823 |
-| 过滤无匹配 | Reuse   | Values |        29.413 |      16 |         2 |
+| 字段读取   | OneShot | Values |       812.727 | 2382554 |     20123 |
+| 字段读取   | Reuse   | Values |         0.049 |      40 |         3 |
+| 字段读取   | Reuse   | Nodes  |         0.097 |      88 |         4 |
+| 批量标题   | OneShot | Values |       819.335 | 2448939 |     21137 |
+| 批量标题   | OneShot | Nodes  |       893.081 | 2489324 |     22137 |
+| 批量标题   | Reuse   | Values |        29.750 |   66232 |      1015 |
+| 批量标题   | Reuse   | Nodes  |        78.131 |  106616 |      2015 |
+| 组合过滤   | OneShot | Values |       866.717 | 2388244 |     20203 |
+| 组合过滤   | Reuse   | Values |        37.504 |    4088 |        67 |
+| 正则过滤   | OneShot | Values |      1626.018 | 3414767 |     44860 |
+| 正则过滤   | Reuse   | Values |       721.601 | 1029573 |     24695 |
+| 递归查找   | OneShot | Values |       955.305 | 2458020 |     21141 |
+| 递归查找   | Reuse   | Values |        89.776 |   75632 |      1023 |
+| 递归查找   | Reuse   | Nodes  |       163.125 |  138417 |      2023 |
+| 过滤无匹配 | Reuse   | Values |        28.223 |      16 |         2 |
 
 对应表达式：
 
