@@ -1,3 +1,3 @@
 module github.com/saltfishpr/jsonpath
 
-go 1.16
+go 1.18

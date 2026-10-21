@@ -1,150 +1,122 @@
 # jsonpath
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/saltfishpr/jsonpath.svg)](https://pkg.go.dev/github.com/saltfishpr/jsonpath)
+面向 Go 1.18+ 的 RFC 9535 JSONPath 包，无运行时第三方依赖。输入为原始 JSON，查询结果为保留原文的 `json.RawMessage`，可同时返回 Normalized Path。
 
-Go 语言实现的 JSONPath 查询语法解析器和求值器，提供类似 gjson 的 API 风格。
-
-完全遵循 [RFC 9535](https://www.rfc-editor.org/rfc/rfc9535.html) 标准。
-
-## 特性
-
-- RFC 9535 标准实现
-- 类似 gjson 的简洁 API
-- 支持过滤表达式 `?(@.price < 10)`
-- 支持递归 descent `..`
-- 支持数组切片 `[start:end:step]`
-- 内置函数：`length()`, `count()`, `match()`, `search()`, `value()`
-- 支持自定义函数注册
-- 零依赖，纯 Go 实现
-
-## 安装
-
-```bash
-go get github.com/saltfishpr/jsonpath
-```
-
-## 快速开始
+## 使用
 
 ```go
 package main
 
 import (
     "fmt"
+    "log"
+
     "github.com/saltfishpr/jsonpath"
 )
 
 func main() {
-    json := `{
-        "store": {
-            "book": [
-                {"category": "reference", "author": "Nigel Rees", "title": "Sayings of the Century", "price": 8.95},
-                {"category": "fiction", "author": "Evelyn Waugh", "title": "Sword of Honour", "price": 12.99},
-                {"category": "fiction", "author": "Herman Melville", "title": "Moby Dick", "isbn": "0-553-21311-3", "price": 8.99}
-            ],
-            "bicycle": {"color": "red", "price": 399}
-        }
-    }`
-
-    // 获取所有书籍的作者
-    result := jsonpath.GetMany(json, "$.store.book[*].author")
-    for _, r := range result {
-        fmt.Println(r.String())
+    doc, err := jsonpath.Parse([]byte(`{"books":[{"title":"Go","price":8},{"title":"Rust","price":12}]}`))
+    if err != nil {
+        log.Fatal(err)
     }
-    // Output:
-    // Nigel Rees
-    // Evelyn Waugh
-    // Herman Melville
+    query, err := jsonpath.Compile(`$.books[?@.price < 10].title`)
+    if err != nil {
+        log.Fatal(err)
+    }
+    nodes, err := query.Nodes(doc)
+    if err != nil {
+        log.Fatal(err)
+    }
+    for _, node := range nodes {
+        fmt.Printf("%s: %s\n", node.Path, node.Value)
+        // $['books'][0]['title']: "Go"
+    }
 }
 ```
 
-## API 用法
+一次性查询使用 `QueryValues(expr, data)` 或 `QueryNodes(expr, data)`。需要复用时分别调用 `Compile` 和 `Parse`，然后使用 `query.Values(doc)` 或 `query.Nodes(doc)`。`Values` 不构建路径。调用方可以用 `encoding/json.Unmarshal` 将返回片段解码到业务类型。
 
-### Get / GetMany
+当前 module path 是本地占位名称 `jsonpath`。发布到远程仓库前，应替换 `go.mod` 及内部 import 中的 module path。
 
-```go
-// Get 获取第一个匹配结果
-result := jsonpath.Get(json, "$.store.book[0].author")
-fmt.Println(result.String()) // Nigel Rees
+## 行为约定
 
-// GetMany 获取所有匹配结果
-results := jsonpath.GetMany(json, "$..author")
-for _, r := range results {
-    fmt.Println(r.String())
-}
+- 支持 root、child/descendant、name、wildcard、index、slice、filter，以及 `length`、`count`、`value`、`match`、`search` 五个标准函数。
+- 编译阶段检查语法、函数参数类型及 singular query。不存在 JavaScript 求值、隐式 truthiness 或自定义函数注册。
+- `Document` 和 `Query` 不可变，可并发复用；零值和 nil 不能用于求值，会返回错误。
+- `Parse` 复制输入；返回的每个 JSON 片段独立分配，修改片段不会修改文档或其他结果。
+- 结果保留重复节点、数组和 selector 顺序；对象按原文成员顺序遍历。无匹配返回非 nil 空 slice；匹配 `null` 返回 JSON 片段 `null`。
+- 片段保留数值写法、转义和容器内部空白，但不包含值外围空白。数值比较使用精确十进制语义，不转换为 `float64`。例如 `0.1` 与 `1e-1` 相等，大于 2^53 的相邻整数仍可区分。
+- JSON 输入必须包含且仅包含一个值，拒绝重复成员名、非法 UTF-8 和未配对 surrogate。重复成员名按解码后的字符串判断。
+- `CompileError` 与 `DocumentError` 包含零起始字节偏移；`LimitError` 表示资源限制。使用 `errors.As` 区分错误。
+
+## 正则与资源限制
+
+`match` 是全字符串匹配，`search` 是子串匹配。正则使用 RFC 9485 的 checking I-Regexp 实现：`^`、`$` 是普通字符；`.` 排除 CR 和 LF；不接受 `\d`、`\w`、inline flags、lookaround 或反向引用。非法模式返回 false。
+
+Unicode categories 跟随构建工具链的 `unicode.Version`，补齐 `Cn` 和 `C`。不同 Go 版本的 Unicode 数据可能对新增字符产生不同分类。
+
+JSON 容器、JSONPath parser 和 I-Regexp 括号的嵌套深度限制为 1024。超限返回 `LimitError`；JSONPath parser 的计数包含 bracketed selection 和嵌套过滤表达式。
+
+I-Regexp 使用位置集合和记忆化，支持超过 1000 次的重复以及嵌套重复，不展开巨大量词。它不保证所有模式的线性时间或空间；复杂模式、大文档和大量查询结果仍可能消耗较多资源。当前 API 没有 context 取消或执行预算。查询在内存中构建完整文档及完整结果，不是流式处理。
+
+
+最低版本验收使用 Go 1.18.10 实际运行测试。32 位兼容检查：
+
+```sh
+GOOS=linux GOARCH=386 go test -c -o /tmp/jsonpath-linux-386.test .
 ```
 
-### 结果类型转换
+## 性能测试
 
-```go
-result := jsonpath.Get(json, "$.store.book[0].price")
+运行全部 benchmark（编译、解析及 14 种查询场景）：
 
-// 转换为各种类型
-fmt.Println(result.Float())  // 8.95
-fmt.Println(result.Int())    // 8
-fmt.Println(result.String()) // 8.95
-fmt.Println(result.Bool())   // true
-
-// 检查类型
-result.IsArray()  // false
-result.IsObject() // false
-result.IsBool()   // false
-result.Exists()   // true
+```sh
+go test -run '^$' -bench . -benchmem -benchtime=100ms -count=3
 ```
 
-### 数组和对象操作
+以下为 Apple M4 Pro、macOS darwin/arm64、Go 1.26.1、GOMAXPROCS=14 下的实测结果。128 个 benchmark 各运行 3 次，全部通过，总耗时约 61 秒；表中各指标取 3 次结果的中位数。100ms 是短时测量，结果仅供参考；稳定对比建议使用 `-benchtime=1s -count=5`，并保持机器负载一致。这些 benchmark 为串行执行，不代表并发吞吐量。
 
-```go
-// 获取数组
-arr := jsonpath.Get(json, "$.store.book").Array()
-for i, elem := range arr {
-    fmt.Printf("[%d] %s\n", i, elem.String())
-}
+测试数据由 `jsonpath_benchmark_test.go` 确定性生成，包含文档元信息和 10 或 1000 本书，每本书包含标题、价格、可用状态、作者及标签。数据生成不计入耗时。
 
-// 获取对象
-obj := jsonpath.Get(json, "$.store.bicycle").Map()
-for k, v := range obj {
-    fmt.Printf("%s: %v\n", k, v.Value())
-}
-```
+### 编译与解析
 
-### 链式查询
+| 操作              | 耗时（µs/op） |    B/op | allocs/op |
+| ----------------- | ------------: | ------: | --------: |
+| Compile：字段查询 |         0.091 |     288 |         5 |
+| Compile：组合过滤 |         0.502 |    1928 |        21 |
+| Compile：正则过滤 |         1.032 |    2992 |        52 |
+| Parse：10 本书    |         8.232 |   26304 |       342 |
+| Parse：1000 本书  |       872.290 | 2494257 |     32118 |
 
-```go
-// 在已有结果上继续查询
-result := jsonpath.Get(json, "$.store")
-bicycle := result.Get("$.bicycle")
-color := bicycle.Get("$.color")
-fmt.Println(color.String()) // red
-```
+### 查询
 
-### 函数支持
+以下均使用 1000 本书的数据。`OneShot` 调用 `QueryValues` 或 `QueryNodes`，包含编译和解析；`Reuse` 在计时前完成 Compile 和 Parse，仅测量求值及结果构造。Values 返回 JSON 片段，Nodes 额外构造 normalized path。
 
-支持以下 RFC 9535 标准函数：
+| 场景       | 模式    | 结果   | 耗时（µs/op） |    B/op | allocs/op |
+| ---------- | ------- | ------ | ------------: | ------: | --------: |
+| 字段读取   | OneShot | Values |       933.813 | 2494597 |     32128 |
+| 字段读取   | Reuse   | Values |         0.077 |      56 |         5 |
+| 字段读取   | Reuse   | Nodes  |         0.145 |     136 |         8 |
+| 批量标题   | OneShot | Values |      1030.979 | 2560964 |     33140 |
+| 批量标题   | OneShot | Nodes  |      1204.637 | 2640548 |     37040 |
+| 批量标题   | Reuse   | Values |        29.741 |   66232 |      1015 |
+| 批量标题   | Reuse   | Nodes  |       120.262 |  145816 |      4915 |
+| 组合过滤   | OneShot | Values |      1298.066 | 2635951 |     38366 |
+| 组合过滤   | Reuse   | Values |       140.029 |  139769 |      6227 |
+| 正则过滤   | OneShot | Values |      1654.541 | 3542818 |     58865 |
+| 正则过滤   | Reuse   | Values |       742.170 | 1045576 |     26695 |
+| 递归查找   | OneShot | Values |      1078.990 | 2570043 |     33144 |
+| 递归查找   | Reuse   | Values |        83.037 |   75632 |      1023 |
+| 递归查找   | Reuse   | Nodes  |       210.593 |  212818 |      5823 |
+| 过滤无匹配 | Reuse   | Values |        57.611 |   16016 |      2002 |
 
-| 函数                     | 说明                                     | 示例                        |
-| ------------------------ | ---------------------------------------- | --------------------------- |
-| `length(value)`          | 返回字符串长度/数组元素个数/对象属性个数 | `length(@.title)`           |
-| `count(nodes)`           | 统计节点数量                             | `count(@.price[?(@ > 10)])` |
-| `match(value, pattern)`  | 完全匹配正则表达式                       | `match(@.category, "^ref")` |
-| `search(value, pattern)` | 搜索正则表达式                           | `search(@.title, "Of")`     |
-| `value(nodes)`           | 从节点提取单个值                         | `value(@..isbn)`            |
+对应表达式：
 
-## JSONPath 语法示例
+- 字段读取：`$.meta.total`
+- 批量标题：`$.books[*].title`
+- 组合过滤：`$.books[?@.price < 10 && @.available == true].title`
+- 正则过滤：`$.books[?match(@.title, "Book [0-9]+")].title`
+- 递归查找：`$..name`
+- 过滤无匹配：`$.books[?@.price < 0].title`
 
-| 表达式                   | 描述                   |
-| ------------------------ | ---------------------- |
-| `$.store.book[*].author` | 所有书籍的作者         |
-| `$..author`              | 所有作者（递归查找）   |
-| `$.store.*`              | store 下的所有值       |
-| `$.store..price`         | 所有价格值             |
-| `$..book[2]`             | 第三本书               |
-| `$..book[-1]`            | 最后一本书             |
-| `$..book[:2]`            | 前两本书               |
-| `$..book[0,1]`           | 前两本书（另一种写法） |
-| `$..book[?(@.isbn)]`     | 有 ISBN 的书           |
-| `$..book[?(@.price<10)]` | 价格小于 10 的书       |
-| `$..*`                   | 所有成员值和数组元素   |
-
-## 许可证
-
-MIT License
+重复查询同一文档时，复用 Query 和 Document 可以避免重复编译与解析；不需要节点路径时优先使用 Values。即使复用，结果片段仍会独立分配，批量返回和路径构造的成本不会被消除。

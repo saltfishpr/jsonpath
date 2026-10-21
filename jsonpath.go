@@ -1,299 +1,117 @@
-// Package jsonpath implements JSONPath query syntax parser and evaluator with gjson-style API.
-//
-// The implementation follows RFC 9535: https://www.rfc-editor.org/rfc/rfc9535.html
 package jsonpath
 
 import (
-	"strconv"
-	"strings"
+	"encoding/json"
+	"fmt"
+	"unicode/utf8"
 )
 
-// JSONType represents the type of a JSON value
-type JSONType int
-
-const (
-	// JSONTypeNull is a null json value
-	JSONTypeNull JSONType = iota
-	// JSONTypeFalse is a json false boolean
-	JSONTypeFalse
-	// JSONTypeNumber is json number
-	JSONTypeNumber
-	// JSONTypeString is json string
-	JSONTypeString
-	// JSONTypeTrue is a json true boolean
-	JSONTypeTrue
-	// JSONTypeJSON is a raw block of JSON
-	JSONTypeJSON
-)
-
-// String returns a string representation of the type
-func (t JSONType) String() string {
-	return []string{"Null", "False", "Number", "String", "True", "JSON"}[t]
+// Query is an immutable compiled expression, safe for concurrent evaluation.
+// Create it with Compile; its zero value is not usable.
+type Query struct {
+	source   string
+	path     pathExpr
+	compiled bool
 }
 
-// Result represents a JSON value returned from Get()
-type Result struct {
-	// Type is the json type
-	Type JSONType
-	// Raw is the raw json
-	Raw string
-	// Str is the json string
-	Str string
-	// Num is the json number
-	Num float64
-	// Index of raw value in original json, zero means index unknown
-	Index int
+// Node pairs a selected JSON value with its RFC 9535 normalized location.
+// Value is an independent copy of the source text, excluding surrounding space.
+type Node struct {
+	// Value contains the selected JSON text, owned by the caller.
+	Value json.RawMessage
+	// Path is the RFC 9535 normalized path identifying this node.
+	Path string
 }
 
-// Get executes a JSONPath query and returns the first result
-func Get(json, path string) Result {
-	query, err := Parse(path)
-	if err != nil {
-		return Result{}
+// Compile parses and type-checks an RFC 9535 expression for repeated use.
+func Compile(expr string) (*Query, error) {
+	if !utf8.ValidString(expr) {
+		return nil, &CompileError{0, "invalid UTF-8"}
 	}
-	eval := NewEvaluator(json, query)
-	results := eval.Evaluate()
-	if len(results) == 0 {
-		return Result{}
+	p := parser{s: expr}
+	if len(expr) == 0 || expr[0] != '$' {
+		return nil, &CompileError{0, "expression must start with $"}
 	}
-	return results[0]
-}
-
-// GetBytes executes a JSONPath query with []byte input
-func GetBytes(json []byte, path string) Result {
-	return Get(string(json), path)
-}
-
-// Get continues a query from the current result
-func (r Result) Get(path string) Result {
-	if !r.Exists() {
-		return Result{}
+	path := p.path()
+	if p.err != nil {
+		return nil, p.err
 	}
-	return Get(r.Raw, path)
-}
-
-// GetMany executes a JSONPath query and returns all results
-func GetMany(json, path string) []Result {
-	query, err := Parse(path)
-	if err != nil {
-		return nil
+	if p.pos != len(expr) {
+		return nil, &CompileError{p.pos, "unexpected trailing input"}
 	}
-	eval := NewEvaluator(json, query)
-	return eval.Evaluate()
+	return &Query{source: expr, path: path, compiled: true}, nil
 }
 
-// GetManyBytes executes a JSONPath query with []byte input
-func GetManyBytes(json []byte, path string) []Result {
-	return GetMany(string(json), path)
-}
-
-// GetMany continues a query from the current result
-func (r Result) GetMany(path string) []Result {
-	if !r.Exists() {
-		return nil
-	}
-	return GetMany(r.Raw, path)
-}
-
-// Exists checks if the result exists
-func (r Result) Exists() bool {
-	return r.Type != JSONTypeNull || len(r.Raw) != 0
-}
-
-// IsObject checks if the result is a JSON object
-func (r Result) IsObject() bool {
-	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '{'
-}
-
-// IsArray checks if the result is a JSON array
-func (r Result) IsArray() bool {
-	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '['
-}
-
-// IsString checks if the result is a string
-func (r Result) IsString() bool {
-	return r.Type == JSONTypeString
-}
-
-// IsBool checks if the result is a boolean
-func (r Result) IsBool() bool {
-	return r.Type == JSONTypeTrue || r.Type == JSONTypeFalse
-}
-
-// String returns the string representation
-func (r Result) String() string {
-	switch r.Type {
-	case JSONTypeNull:
-		return ""
-	case JSONTypeFalse:
-		return "false"
-	case JSONTypeTrue:
-		return "true"
-	case JSONTypeString:
-		return r.Str
-	case JSONTypeNumber:
-		if r.Raw == "" {
-			return strconv.FormatFloat(r.Num, 'f', -1, 64)
-		}
-		return r.Raw
-	case JSONTypeJSON:
-		return r.Raw
-	default:
+// String returns the expression passed to Compile.
+func (q *Query) String() string {
+	if q == nil {
 		return ""
 	}
+	return q.source
 }
 
-// Int returns the int64 representation
-func (r Result) Int() int64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return int64(r.Num)
-	case JSONTypeString:
-		n, _ := strconv.ParseInt(r.Str, 10, 64)
-		return n
+// QueryValues compiles expr, parses data and returns selected JSON fragments.
+func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
+	q, err := Compile(expr)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	d, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	return q.Values(d)
 }
 
-// Uint returns the uint64 representation
-func (r Result) Uint() uint64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return uint64(r.Num)
-	case JSONTypeString:
-		n, _ := strconv.ParseUint(r.Str, 10, 64)
-		return n
+// QueryNodes compiles expr, parses data and returns selected fragments and paths.
+func QueryNodes(expr string, data []byte) ([]Node, error) {
+	q, err := Compile(expr)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	d, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	return q.Nodes(d)
 }
 
-// Float returns the float64 representation
-func (r Result) Float() float64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return r.Num
-	case JSONTypeString:
-		f, _ := strconv.ParseFloat(r.Str, 64)
-		return f
+func (q *Query) run(d *Document) ([]*jsonNode, error) {
+	if q == nil || !q.compiled {
+		return nil, fmt.Errorf("jsonpath: uninitialized query")
 	}
-	return 0
+	if err := validDocument(d); err != nil {
+		return nil, err
+	}
+	c := evalContext{root: d.root}
+	nodes := c.path(q.path, d.root)
+	return nodes, c.err
 }
 
-// Bool returns the bool representation
-func (r Result) Bool() bool {
-	switch r.Type {
-	case JSONTypeTrue:
-		return true
-	case JSONTypeFalse:
-		return false
-	case JSONTypeString:
-		b, _ := strconv.ParseBool(strings.ToLower(r.Str))
-		return b
-	case JSONTypeNumber:
-		return r.Num != 0
+// Values evaluates q against doc without constructing paths. Each fragment is
+// independently owned by the caller. No matches returns an empty slice.
+func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
+	nodes, err := q.run(doc)
+	if err != nil {
+		return nil, err
 	}
-	return false
+	out := make([]json.RawMessage, len(nodes))
+	for i, n := range nodes {
+		out[i] = json.RawMessage(doc.source[n.start:n.end])
+	}
+	return out, nil
 }
 
-// Array returns the []Result representation
-func (r Result) Array() []Result {
-	if r.Type == JSONTypeNull {
-		return []Result{}
+// Nodes evaluates q against doc, returning independent fragments paired with
+// normalized paths. Repeated selections are retained in the result.
+func (q *Query) Nodes(doc *Document) ([]Node, error) {
+	nodes, err := q.run(doc)
+	if err != nil {
+		return nil, err
 	}
-	if !r.IsArray() {
-		return []Result{r}
+	out := make([]Node, len(nodes))
+	for i, n := range nodes {
+		out[i] = Node{json.RawMessage(doc.source[n.start:n.end]), normalizedPath(n)}
 	}
-
-	var results []Result
-	i := 1
-	for i < len(r.Raw) {
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) || r.Raw[i] == ']' {
-			break
-		}
-		elem, next := parseArrayElement(r.Raw, i)
-		results = append(results, elem)
-		i = next
-
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i < len(r.Raw) && r.Raw[i] == ',' {
-			i++
-		}
-	}
-	return results
-}
-
-// Map returns the map[string]Result representation
-func (r Result) Map() map[string]Result {
-	results := make(map[string]Result)
-	for _, kv := range r.MapKVList() {
-		results[kv.Key] = kv.Value
-	}
-	return results
-}
-
-type KV struct {
-	Key   string
-	Value Result
-}
-
-func (r Result) MapKVList() []KV {
-	if r.Type == JSONTypeNull {
-		return []KV{}
-	}
-	if !r.IsObject() {
-		return []KV{}
-	}
-
-	var results []KV
-	i := 1
-	for i < len(r.Raw) {
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) || r.Raw[i] == '}' {
-			break
-		}
-		key, value, next := parseObjectMember(r.Raw, i)
-		// Stop parsing on invalid JSON to prevent infinite loop
-		if key == "" {
-			break
-		}
-		results = append(results, KV{Key: key, Value: value})
-		i = next
-
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i < len(r.Raw) && r.Raw[i] == ',' {
-			i++
-		}
-	}
-	return results
-}
-
-// Value returns the Go native value representation
-func (r Result) Value() interface{} {
-	switch r.Type {
-	case JSONTypeNull:
-		return nil
-	case JSONTypeTrue:
-		return true
-	case JSONTypeFalse:
-		return false
-	case JSONTypeNumber:
-		return r.Num
-	case JSONTypeString:
-		return r.Str
-	case JSONTypeJSON:
-		if r.IsArray() {
-			return r.Array()
-		}
-		if r.IsObject() {
-			return r.Map()
-		}
-	}
-	return nil
+	return out, nil
 }

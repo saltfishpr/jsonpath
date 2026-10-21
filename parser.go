@@ -1,829 +1,405 @@
 package jsonpath
 
 import (
-	"fmt"
+	"strconv"
+	"strings"
+	"unicode/utf8"
+
+	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-// Parse parses a JSONPath expression string and returns an AST
-func Parse(path string) (*Query, error) {
-	lexer := NewLexer(path)
-	p := &Parser{
-		lexer: lexer,
-	}
-	p.advance()
-	p.advance()
-	return p.parseQuery()
+type parser struct {
+	s          string
+	pos, depth int
+	err        error
 }
 
-// Parser parses JSONPath expressions into an AST
-type Parser struct {
-	lexer *Lexer
-	curr  Token
-	peek  Token
-}
-
-func (p *Parser) advance() {
-	p.curr = p.peek
-	p.peek = p.lexer.NextToken()
-}
-
-func (p *Parser) expectToken(tokenType TokenType) error {
-	if p.curr.Type != tokenType {
-		return fmt.Errorf("except %s, got %s(%q)", tokenType, p.curr.Type, p.curr.Value)
-	}
-	return nil
-}
-
-// parseQuery parses a complete JSONPath query
-// jsonpath-query = root-identifier segments
-func (p *Parser) parseQuery() (*Query, error) {
-	query := &Query{}
-
-	// Must start with root identifier $
-	if err := p.expectToken(TokenRoot); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	for p.curr.Type != TokenEOF {
-		segment, err := p.parseSegment()
-		if err != nil {
-			return nil, err
-		}
-		query.Segments = append(query.Segments, segment)
-	}
-
-	return query, nil
-}
-
-// parseSegment parses a segment (child or descendant)
-// segment = child-segment / descendant-segment
-func (p *Parser) parseSegment() (*Segment, error) {
-	switch p.curr.Type {
-	case TokenDotDot:
-		p.advance()
-		return p.parseDescendantSegment()
-
-	case TokenDot:
-		p.advance()
-		return p.parseDotSegment()
-
-	case TokenLBracket:
-		return p.parseBracketSegment(ChildSegment)
-
-	default:
-		return nil, fmt.Errorf("unexpected token %s(%q), expected '.' or '..'", p.curr.Type, p.curr.Value)
+func (p *parser) fail(message string) {
+	if p.err == nil {
+		p.err = &CompileError{p.pos, message}
 	}
 }
 
-// parseDescendantSegment parses descendant segments (..name or ..[...])
-// descendant-segment = ".." name-segment / "..[" selectors "]"
-func (p *Parser) parseDescendantSegment() (*Segment, error) {
-	segment := &Segment{Type: DescendantSegment}
-
-	switch p.curr.Type {
-	case TokenLBracket:
-		return p.parseBracketSegment(DescendantSegment)
-
-	case TokenWildcard:
-		segment.Selectors = []*Selector{{Type: WildcardSelector}}
-		p.advance()
-		return segment, nil
-
-	case TokenIdent, TokenNull, TokenTrue, TokenFalse:
-		name := p.curr.Value
-		segment.Selectors = []*Selector{{
-			Type: NameSelector,
-			Name: name,
-		}}
-		p.advance()
-		return segment, nil
-
-	default:
-		return nil, fmt.Errorf("unexpected token %s(%q) after '..' at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
+func (p *parser) skip() {
+	for p.pos < len(p.s) && space(p.s[p.pos]) {
+		p.pos++
 	}
 }
 
-// parseDotSegment parses dot notation segments (.name or .*)
-func (p *Parser) parseDotSegment() (*Segment, error) {
-	segment := &Segment{Type: ChildSegment}
-
-	switch p.curr.Type {
-	case TokenWildcard:
-		segment.Selectors = []*Selector{{Type: WildcardSelector}}
-		p.advance()
-		return segment, nil
-
-	case TokenIdent, TokenNull, TokenTrue, TokenFalse:
-		name := p.curr.Value
-		segment.Selectors = []*Selector{{
-			Type: NameSelector,
-			Name: name,
-		}}
-		p.advance()
-		return segment, nil
-
-	default:
-		return nil, fmt.Errorf("unexpected token %s(%q) after '.' at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
+func (p *parser) take(s string) bool {
+	if strings.HasPrefix(p.s[p.pos:], s) {
+		p.pos += len(s)
+		return true
 	}
+	return false
 }
 
-// parseBracketSegment parses bracket-notation segments
-// bracketed-selection = "[" S selector *(S "," S selector) S "]"
-func (p *Parser) parseBracketSegment(segType SegmentType) (*Segment, error) {
-	if err := p.expectToken(TokenLBracket); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	segment := &Segment{Type: segType}
-
-	selectors, err := p.parseSelectors()
-	if err != nil {
-		return nil, err
-	}
-	segment.Selectors = selectors
-
-	if err := p.expectToken(TokenRBracket); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	return segment, nil
-}
-
-func (p *Parser) parseSelectors() ([]*Selector, error) {
-	var selectors []*Selector
-
-	sel, err := p.parseSelector()
-	if err != nil {
-		return nil, err
-	}
-	selectors = append(selectors, sel)
-
-	for p.curr.Type == TokenComma {
-		p.advance()
-		sel, err := p.parseSelector()
-		if err != nil {
-			return nil, err
-		}
-		selectors = append(selectors, sel)
-	}
-
-	return selectors, nil
-}
-
-// parseSelector parses a single selector
-// selector = name-selector / wildcard-selector / index-selector / slice-selector / filter-selector
-func (p *Parser) parseSelector() (*Selector, error) {
-	switch p.curr.Type {
-	case TokenString:
-		sel := &Selector{
-			Type: NameSelector,
-			Name: p.curr.Value,
-		}
-		p.advance()
-		return sel, nil
-
-	case TokenWildcard:
-		sel := &Selector{Type: WildcardSelector}
-		p.advance()
-		return sel, nil
-
-	case TokenNumber:
-		if p.peek.Type == TokenColon {
-			return p.parseSliceSelector()
-		}
-		return p.parseIndexSelector()
-
-	case TokenColon:
-		return p.parseSliceSelector()
-
-	case TokenQuestion:
-		return p.parseFilterSelector()
-
-	default:
-		return nil, fmt.Errorf("unexpected token %s(%q) in selector at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
-	}
-}
-
-func (p *Parser) parseIndexSelector() (*Selector, error) {
-	if err := p.expectToken(TokenNumber); err != nil {
-		return nil, err
-	}
-
-	index, err := parseInteger(p.curr.Value)
-	if err != nil {
-		return nil, fmt.Errorf("invalid index %q at position %d: %w", p.curr.Value, p.curr.Pos, err)
-	}
-
-	p.advance()
-	return &Selector{
-		Type:  IndexSelector,
-		Index: index,
-	}, nil
-}
-
-// parseSliceSelector parses array slice selectors (start:end:step)
-func (p *Parser) parseSliceSelector() (*Selector, error) {
-	slice := &SliceParams{}
-
-	// Parse start (optional)
-	if p.curr.Type == TokenNumber {
-		start, err := parseInteger(p.curr.Value)
-		if err != nil {
-			return nil, fmt.Errorf("invalid slice start %q: %w", p.curr.Value, err)
-		}
-		slice.Start = &start
-		p.advance()
-	}
-
-	// Expect colon
-	if err := p.expectToken(TokenColon); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	// Parse end (optional)
-	if p.curr.Type == TokenNumber {
-		end, err := parseInteger(p.curr.Value)
-		if err != nil {
-			return nil, fmt.Errorf("invalid slice end %q: %w", p.curr.Value, err)
-		}
-		slice.End = &end
-		p.advance()
-	}
-
-	// Parse step (optional)
-	if p.curr.Type == TokenColon {
-		p.advance()
-		if p.curr.Type != TokenNumber {
-			return nil, fmt.Errorf("expected step number after ':', got %s(%q)", p.curr.Type, p.curr.Value)
-		}
-		step, err := parseInteger(p.curr.Value)
-		if err != nil {
-			return nil, fmt.Errorf("invalid slice step %q: %w", p.curr.Value, err)
-		}
-		slice.Step = &step
-		p.advance()
-	}
-
-	return &Selector{Type: SliceSelector, Slice: slice}, nil
-}
-
-// parseFilterSelector parses filter selectors (?<logical-expr>)
-// filter-selector = "?" S logical-expr
-func (p *Parser) parseFilterSelector() (*Selector, error) {
-	if err := p.expectToken(TokenQuestion); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	expr, err := p.parseLogicalExpr()
-	if err != nil {
-		return nil, err
-	}
-
-	return &Selector{Type: FilterSelector, Filter: expr}, nil
-}
-
-// parseLogicalExpr parses a logical expression
-// logical-expr = logical-or-expr
-func (p *Parser) parseLogicalExpr() (*FilterExpr, error) {
-	return p.parseLogicalOrExpr()
-}
-
-// parseLogicalOrExpr parses logical-or expressions
-// logical-or-expr = logical-and-expr *(S "||" S logical-and-expr)
-func (p *Parser) parseLogicalOrExpr() (*FilterExpr, error) {
-	left, err := p.parseLogicalAndExpr()
-	if err != nil {
-		return nil, err
-	}
-
-	for p.curr.Type == TokenLOr {
-		p.advance()
-		right, err := p.parseLogicalAndExpr()
-		if err != nil {
-			return nil, err
-		}
-		left = &FilterExpr{
-			Type:  FilterLogicalOr,
-			Left:  left,
-			Right: right,
-		}
-	}
-
-	return left, nil
-}
-
-// parseLogicalAndExpr parses logical-and expressions
-// logical-and-expr = basic-expr *(S "&&" S basic-expr)
-func (p *Parser) parseLogicalAndExpr() (*FilterExpr, error) {
-	left, err := p.parseBasicExpr()
-	if err != nil {
-		return nil, err
-	}
-
-	for p.curr.Type == TokenLAnd {
-		p.advance()
-		right, err := p.parseBasicExpr()
-		if err != nil {
-			return nil, err
-		}
-		left = &FilterExpr{
-			Type:  FilterLogicalAnd,
-			Left:  left,
-			Right: right,
-		}
-	}
-
-	return left, nil
-}
-
-// parseBasicExpr parses basic expressions
-// basic-expr = paren-expr / comparison-expr / test-expr
-func (p *Parser) parseBasicExpr() (*FilterExpr, error) {
-	if p.curr.Type == TokenLNot {
-		// Distinguish paren-expr from test-expr
-		if p.peek.Type == TokenLParen {
-			return p.parseParenExpr()
-		}
-		p.advance()
-		test, err := p.parseTestExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &FilterExpr{Type: FilterLogicalNot, Operand: &FilterExpr{Type: FilterTest, Test: test}}, nil
-	}
-
-	if p.curr.Type == TokenLParen {
-		return p.parseParenExpr()
-	}
-
-	return p.parseBasicExprWithFallback()
-}
-
-// parseBasicExprWithFallback tries comparison-expr, falls back to test-expr
-func (p *Parser) parseBasicExprWithFallback() (*FilterExpr, error) {
-	savedCurr := p.curr
-	savedPeek := p.peek
-	savedLexerPos := p.lexer.pos
-
-	comp, err := p.parseComparisonExpr()
-	if err == nil {
-		return &FilterExpr{Type: FilterComparison, Comp: comp}, nil
-	}
-
-	p.curr = savedCurr
-	p.peek = savedPeek
-	p.lexer.pos = savedLexerPos
-
-	test, err := p.parseTestExpr()
-	if err != nil {
-		return nil, err
-	}
-	return &FilterExpr{Type: FilterTest, Test: test}, nil
-}
-
-// parseParenExpr parses parenthesized expressions
-// paren-expr = [logical-not-op S] "(" S logical-expr S ")"
-func (p *Parser) parseParenExpr() (*FilterExpr, error) {
-	hasNot := p.curr.Type == TokenLNot
-	if hasNot {
-		p.advance()
-	}
-
-	if err := p.expectToken(TokenLParen); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	expr, err := p.parseLogicalExpr()
-	if err != nil {
-		return nil, err
-	}
-
-	if err := p.expectToken(TokenRParen); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	expr = &FilterExpr{
-		Type:    FilterParen,
-		Operand: expr,
-	}
-
-	if hasNot {
-		expr = &FilterExpr{
-			Type:    FilterLogicalNot,
-			Operand: expr,
-		}
-	}
-
-	return expr, nil
-}
-
-// parseComparisonExpr parses comparison expressions
-// comparison-expr = comparable S comparison-op S comparable
-func (p *Parser) parseComparisonExpr() (*Comparison, error) {
-	left, err := p.parseComparable()
-	if err != nil {
-		return nil, err
-	}
-
-	op, err := p.parseComparisonOp()
-	if err != nil {
-		return nil, err
-	}
-
-	right, err := p.parseComparable()
-	if err != nil {
-		return nil, err
-	}
-
-	return &Comparison{Left: left, Op: op, Right: right}, nil
-}
-
-func (p *Parser) parseComparisonOp() (CompOp, error) {
-	switch p.curr.Type {
-	case TokenEq:
-		p.advance()
-		return CompEq, nil
-	case TokenNe:
-		p.advance()
-		return CompNe, nil
-	case TokenLt:
-		p.advance()
-		return CompLt, nil
-	case TokenLe:
-		p.advance()
-		return CompLe, nil
-	case TokenGt:
-		p.advance()
-		return CompGt, nil
-	case TokenGe:
-		p.advance()
-		return CompGe, nil
-	default:
-		return 0, fmt.Errorf("expected comparison operator, got %s(%q)", p.curr.Type, p.curr.Value)
-	}
-}
-
-// parseComparable parses comparable values
-// comparable = literal / singular-query / function-expr
-func (p *Parser) parseComparable() (*Comparable, error) {
-	switch p.curr.Type {
-	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
-		lit, err := p.parseLiteral()
-		if err != nil {
-			return nil, err
-		}
-		return &Comparable{Type: ComparableLiteral, Literal: lit}, nil
-
-	case TokenRoot, TokenCurrent:
-		query, err := p.parseSingularQuery()
-		if err != nil {
-			return nil, err
-		}
-		return &Comparable{Type: ComparableSingularQuery, SingularQuery: query}, nil
-
-	case TokenIdent:
-		if p.peek.Type == TokenLParen {
-			fn, err := p.parseFunctionExpr()
-			if err != nil {
-				return nil, err
-			}
-			return &Comparable{Type: ComparableFuncExpr, FuncExpr: fn}, nil
-		}
-		lit := &LiteralValue{Type: LiteralString, Value: p.curr.Value}
-		p.advance()
-		return &Comparable{Type: ComparableLiteral, Literal: lit}, nil
-
-	default:
-		return nil, fmt.Errorf("unexpected token %s(%q) in comparable at position %d", p.curr.Type, p.curr.Value, p.curr.Pos)
-	}
-}
-
-func (p *Parser) parseLiteral() (*LiteralValue, error) {
-	switch p.curr.Type {
-	case TokenString:
-		lit := &LiteralValue{Type: LiteralString, Value: p.curr.Value}
-		p.advance()
-		return lit, nil
-	case TokenNumber:
-		lit := &LiteralValue{Type: LiteralNumber, Value: p.curr.Value}
-		p.advance()
-		return lit, nil
-	case TokenTrue:
-		lit := &LiteralValue{Type: LiteralTrue, Value: p.curr.Value}
-		p.advance()
-		return lit, nil
-	case TokenFalse:
-		lit := &LiteralValue{Type: LiteralFalse, Value: p.curr.Value}
-		p.advance()
-		return lit, nil
-	case TokenNull:
-		lit := &LiteralValue{Type: LiteralNull, Value: p.curr.Value}
-		p.advance()
-		return lit, nil
-	default:
-		return nil, fmt.Errorf("expected literal, got %s(%q)", p.curr.Type, p.curr.Value)
-	}
-}
-
-// parseSingularQuery parses singular queries
-// singular-query = rel-singular-query / abs-singular-query
-func (p *Parser) parseSingularQuery() (*SingularQuery, error) {
-	query := &SingularQuery{}
-
-	switch p.curr.Type {
-	case TokenRoot:
-		query.Relative = false
-		p.advance()
-	case TokenCurrent:
-		query.Relative = true
-		p.advance()
-	default:
-		return nil, fmt.Errorf("expected '$' or '@', got %s(%q)", p.curr.Type, p.curr.Value)
-	}
-
-	for p.curr.Type == TokenDot || p.curr.Type == TokenLBracket {
-		seg, err := p.parseSingularSegment()
-		if err != nil {
-			return nil, err
-		}
-		query.Segments = append(query.Segments, seg)
-	}
-
-	return query, nil
-}
-
-func (p *Parser) parseSingularSegment() (*SingularSegment, error) {
-	seg := &SingularSegment{}
-
-	switch p.curr.Type {
-	case TokenDot:
-		p.advance()
-		switch p.curr.Type {
-		case TokenIdent, TokenNull, TokenTrue, TokenFalse:
-			seg.Type = SingularNameSegment
-			seg.Name = p.curr.Value
-			p.advance()
-			return seg, nil
-		default:
-			return nil, fmt.Errorf("expected identifier after '.', got %s(%q)", p.curr.Type, p.curr.Value)
-		}
-
-	case TokenLBracket:
-		p.advance()
-		switch p.curr.Type {
-		case TokenString:
-			seg.Type = SingularNameSegment
-			seg.Name = p.curr.Value
-			p.advance()
-
-			if err := p.expectToken(TokenRBracket); err != nil {
-				return nil, err
-			}
-			p.advance()
-
-			return seg, nil
-
-		case TokenNumber:
-			index, err := parseInteger(p.curr.Value)
-			if err != nil {
-				return nil, fmt.Errorf("invalid index %q: %w", p.curr.Value, err)
-			}
-			seg.Type = SingularIndexSegment
-			seg.Index = index
-			p.advance()
-
-			if err := p.expectToken(TokenRBracket); err != nil {
-				return nil, err
-			}
-			p.advance()
-
-			return seg, nil
-
-		default:
-			return nil, fmt.Errorf("expected string or number in singular query segment, got %s(%q)", p.curr.Type, p.curr.Value)
-		}
-
-	default:
-		return nil, fmt.Errorf("expected '.' or '[', got %s(%q)", p.curr.Type, p.curr.Value)
-	}
-}
-
-// parseTestExpr parses test expressions (existence tests)
-// test-expr = [logical-not-op S] (filter-query / function-expr)
-func (p *Parser) parseTestExpr() (*TestExpr, error) {
-	test := &TestExpr{}
-
-	switch p.curr.Type {
-	case TokenRoot, TokenCurrent:
-		query, err := p.parseFilterQuery()
-		if err != nil {
-			return nil, err
-		}
-		test.FilterQuery = query
-		return test, nil
-
-	case TokenIdent:
-		fn, err := p.parseFunctionExpr()
-		if err != nil {
-			return nil, err
-		}
-		test.FuncExpr = fn
-		return test, nil
-
-	default:
-		return nil, fmt.Errorf("expected filter query or function expression, got %s(%q)", p.curr.Type, p.curr.Value)
-	}
-}
-
-// parseFilterQuery parses filter queries
-// filter-query = rel-query / jsonpath-query
-func (p *Parser) parseFilterQuery() (*FilterQuery, error) {
-	query := &FilterQuery{}
-
-	switch p.curr.Type {
-	case TokenRoot:
-		query.Relative = false
-		p.advance()
-	case TokenCurrent:
-		query.Relative = true
-		p.advance()
-	default:
-		// No explicit identifier, treat as current node reference
-		query.Relative = true
-	}
-
-	for p.curr.Type == TokenDot || p.curr.Type == TokenDotDot || p.curr.Type == TokenLBracket {
-		segment, err := p.parseSegment()
-		if err != nil {
-			return nil, err
-		}
-		query.Segments = append(query.Segments, segment)
-	}
-
-	return query, nil
-}
-
-// parseFunctionExpr parses function call expressions
-// function-expr = function-name "(" S [function-argument *(S "," S function-argument)] S ")"
-func (p *Parser) parseFunctionExpr() (*FuncCall, error) {
-	if err := p.expectToken(TokenIdent); err != nil {
-		return nil, err
-	}
-
-	name := p.curr.Value
-	if !p.isValidFunctionName(name) {
-		return nil, fmt.Errorf("invalid function name %q", name)
-	}
-	p.advance()
-
-	if err := p.expectToken(TokenLParen); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	fn := &FuncCall{Name: name, Args: []*FuncArg{}}
-
-	if p.curr.Type != TokenRParen {
-		arg, err := p.parseFuncArg()
-		if err != nil {
-			return nil, err
-		}
-		fn.Args = append(fn.Args, arg)
-
-		for p.curr.Type == TokenComma {
-			p.advance()
-			arg, err := p.parseFuncArg()
-			if err != nil {
-				return nil, err
-			}
-			fn.Args = append(fn.Args, arg)
-		}
-	}
-
-	if err := p.expectToken(TokenRParen); err != nil {
-		return nil, err
-	}
-	p.advance()
-
-	return fn, nil
-}
-
-func (p *Parser) isValidFunctionName(name string) bool {
-	for i, ch := range name {
-		if i == 0 && !isFunctionNameFirst(ch) {
-			return false
-		}
-		if !isFunctionNameChar(ch) {
-			return false
-		}
+func (p *parser) enter() bool {
+	p.depth++
+	if p.depth > maxDepth {
+		p.err = &LimitError{"JSONPath nesting", maxDepth}
+		return false
 	}
 	return true
 }
 
-// function-name-first = LCALPHA
-func isFunctionNameFirst(r rune) bool {
-	return (r >= 'a' && r <= 'z')
+func (p *parser) path() pathExpr {
+	result := pathExpr{root: p.take("$")}
+	if !result.root && !p.take("@") {
+		p.fail("expected $ or @")
+		return result
+	}
+	for p.err == nil {
+		before := p.pos
+		p.skip()
+		s := segment{}
+		if p.take("..") {
+			s.descendant = true
+			if p.pos < len(p.s) && p.s[p.pos] == '[' {
+				s.selectors = p.bracket()
+			} else if p.take("*") {
+				s.selectors = []selector{{kind: '*'}}
+			} else {
+				s.selectors = []selector{{kind: 'n', name: p.member()}}
+			}
+		} else if p.take(".") {
+			if p.take("*") {
+				s.selectors = []selector{{kind: '*'}}
+			} else {
+				s.selectors = []selector{{kind: 'n', name: p.member()}}
+			}
+		} else if p.pos < len(p.s) && p.s[p.pos] == '[' {
+			s.selectors = p.bracket()
+		} else {
+			p.pos = before
+			break
+		}
+		result.segments = append(result.segments, s)
+	}
+	return result
 }
 
-// function-name-char = function-name-first / DIGIT / "_"
-func isFunctionNameChar(r rune) bool {
-	return isFunctionNameFirst(r) || (r >= '0' && r <= '9') || r == '_'
+func nameFirst(r rune) bool {
+	return r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= 128
 }
 
-func (p *Parser) parseFuncArg() (*FuncArg, error) {
-	switch p.curr.Type {
-	case TokenString, TokenNumber, TokenTrue, TokenFalse, TokenNull:
-		lit, err := p.parseLiteral()
-		if err != nil {
-			return nil, err
+func (p *parser) member() string {
+	start := p.pos
+	for p.pos < len(p.s) {
+		r, n := utf8.DecodeRuneInString(p.s[p.pos:])
+		if !nameFirst(r) && !(p.pos > start && r >= '0' && r <= '9') {
+			break
 		}
-		return &FuncArg{Type: FuncArgLiteral, Literal: lit}, nil
+		p.pos += n
+	}
+	if p.pos == start {
+		p.fail("expected member name")
+	}
+	return p.s[start:p.pos]
+}
 
-	case TokenRoot, TokenCurrent:
-		return p.parseFuncArgRootOrCurrent()
+func (p *parser) integer() *int64 {
+	start := p.pos
+	p.take("-")
+	digits := p.pos
+	for p.pos < len(p.s) && digit(p.s[p.pos]) {
+		p.pos++
+	}
+	if digits == p.pos {
+		p.fail("expected integer")
+		return nil
+	}
+	raw := p.s[start:p.pos]
+	if raw == "-0" || (p.pos-digits > 1 && p.s[digits] == '0') {
+		p.fail("invalid integer")
+		return nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < -9007199254740991 || n > 9007199254740991 {
+		p.fail("integer outside interoperable range")
+		return nil
+	}
+	return &n
+}
 
-	case TokenIdent:
-		fn, err := p.parseFunctionExpr()
-		if err != nil {
-			return nil, err
+func (p *parser) bracket() []selector {
+	if !p.enter() {
+		return nil
+	}
+	defer func() { p.depth-- }()
+	p.pos++
+	var out []selector
+	for p.err == nil {
+		p.skip()
+		s := selector{}
+		if p.pos == len(p.s) {
+			p.fail("unterminated selection")
+			break
 		}
-		return &FuncArg{Type: FuncArgFuncExpr, FuncExpr: fn}, nil
+		switch p.s[p.pos] {
+		case '\'', '"':
+			s.kind = 'n'
+			name, err := readString(p.s, &p.pos)
+			if err != nil {
+				p.fail(err.Error())
+			}
+			s.name = name
+		case '*':
+			p.pos++
+			s.kind = '*'
+		case '?':
+			p.pos++
+			p.skip()
+			s.kind = '?'
+			s.filter = p.or()
+			if p.err == nil {
+				p.require(s.filter, logicalType)
+			}
+		default:
+			s.kind = 'i'
+			var first *int64
+			if p.s[p.pos] != ':' {
+				first = p.integer()
+			}
+			p.skip()
+			if p.take(":") {
+				s.kind = 's'
+				s.start = first
+				p.skip()
+				if p.pos < len(p.s) && (digit(p.s[p.pos]) || p.s[p.pos] == '-') {
+					s.end = p.integer()
+				}
+				p.skip()
+				if p.take(":") {
+					p.skip()
+					if p.pos < len(p.s) && (digit(p.s[p.pos]) || p.s[p.pos] == '-') {
+						s.step = p.integer()
+					}
+				}
+			} else if first != nil {
+				s.index = *first
+			}
+		}
+		out = append(out, s)
+		p.skip()
+		if p.take("]") {
+			break
+		}
+		if !p.take(",") {
+			p.fail("expected comma or ]")
+			break
+		}
+	}
+	return out
+}
 
+func (p *parser) or() *expression {
+	e := p.and()
+	for p.err == nil {
+		p.skip()
+		if !p.take("||") {
+			break
+		}
+		p.skip()
+		e = &expression{kind: 'b', name: "||", left: e, right: p.and(), offset: p.pos}
+	}
+	return e
+}
+
+func (p *parser) and() *expression {
+	e := p.basic()
+	for p.err == nil {
+		p.skip()
+		if !p.take("&&") {
+			break
+		}
+		p.skip()
+		e = &expression{kind: 'b', name: "&&", left: e, right: p.basic(), offset: p.pos}
+	}
+	return e
+}
+
+func (p *parser) basic() *expression {
+	if !p.enter() {
+		return &expression{}
+	}
+	defer func() { p.depth-- }()
+	p.skip()
+	start := p.pos
+	if p.take("!") {
+		p.skip()
+		e := p.atom()
+		return &expression{kind: '!', left: e, offset: start}
+	}
+	left := p.atom()
+	p.skip()
+	for _, op := range []string{"==", "!=", "<=", ">=", "<", ">"} {
+		if p.take(op) {
+			p.skip()
+			return &expression{kind: 'c', name: op, left: left, right: p.atom(), offset: start}
+		}
+	}
+	return left
+}
+
+func (p *parser) atom() *expression {
+	e := &expression{offset: p.pos}
+	if p.err != nil {
+		return e
+	}
+	if p.pos == len(p.s) {
+		p.fail("expected expression")
+		return e
+	}
+	switch c := p.s[p.pos]; {
+	case c == '(':
+		p.pos++
+		p.skip()
+		e.kind = '('
+		e.left = p.or()
+		p.skip()
+		if !p.take(")") {
+			p.fail("expected )")
+		}
+	case c == '$' || c == '@':
+		e.kind = 'q'
+		e.path = p.path()
+	case c == '\'' || c == '"':
+		e.kind = 'v'
+		s, err := readString(p.s, &p.pos)
+		if err != nil {
+			p.fail(err.Error())
+		}
+		e.literal = &jsonNode{kind: stringKind, text: s}
+	case c == '-' || digit(c):
+		e.kind = 'v'
+		start := p.pos
+		if !scanNumber(p.s, &p.pos) {
+			p.fail("invalid number")
+			return e
+		}
+		e.literal = &jsonNode{kind: numberKind, number: parseDecimal(p.s[start:p.pos])}
+	case c >= 'a' && c <= 'z':
+		start := p.pos
+		for p.pos < len(p.s) {
+			c = p.s[p.pos]
+			if !(c >= 'a' && c <= 'z' || c == '_' || digit(c)) {
+				break
+			}
+			p.pos++
+		}
+		word := p.s[start:p.pos]
+		if word == "true" || word == "false" || word == "null" {
+			e.kind = 'v'
+			e.literal = &jsonNode{kind: nullKind}
+			if word != "null" {
+				e.literal.kind = boolKind
+				e.literal.boolean = word == "true"
+			}
+			return e
+		}
+		e.kind = 'f'
+		e.name = word
+		if !p.take("(") {
+			p.fail("expected function call")
+			return e
+		}
+		p.skip()
+		if p.take(")") {
+			return e
+		}
+		for p.err == nil {
+			e.args = append(e.args, p.or())
+			p.skip()
+			if p.take(")") {
+				break
+			}
+			if !p.take(",") {
+				p.fail("expected comma or )")
+				break
+			}
+			p.skip()
+		}
 	default:
-		return nil, fmt.Errorf("unexpected token %s(%q) in function argument", p.curr.Type, p.curr.Value)
+		p.fail("expected literal, query, function or parentheses")
 	}
+	return e
 }
 
-func (p *Parser) parseFuncArgRootOrCurrent() (*FuncArg, error) {
-	savedCurr := p.curr
-	savedPeek := p.peek
-	savedLexerPos := p.lexer.pos
-
-	query, err := p.parseFilterQuery()
-	if err != nil {
-		return nil, err
+func (p *parser) require(e *expression, want exprType) {
+	if p.err != nil {
+		return
 	}
-
-	switch p.curr.Type {
-	case TokenLAnd, TokenLOr:
-		op := p.curr.Type
-		p.advance()
-
-		right, err := p.parseLogicalExpr()
-		if err != nil {
-			return nil, err
-		}
-		var filterType FilterExprType
-		switch op {
-		case TokenLAnd:
-			filterType = FilterLogicalAnd
-		case TokenLOr:
-			filterType = FilterLogicalOr
-		}
-		return &FuncArg{
-			LogicalExpr: &FilterExpr{
-				Type: filterType,
-				Left: &FilterExpr{
-					Test: &TestExpr{
-						FilterQuery: query,
-					},
-				},
-				Right: right,
-			},
-		}, nil
-
-	case TokenEq, TokenNe, TokenLt, TokenLe, TokenGt, TokenGe:
-		// reparse comparison
-		p.curr = savedCurr
-		p.peek = savedPeek
-		p.lexer.pos = savedLexerPos
-		comp, err := p.parseComparisonExpr()
-		if err != nil {
-			return nil, err
-		}
-		return &FuncArg{
-			LogicalExpr: &FilterExpr{
-				Type: FilterComparison,
-				Comp: comp,
-			},
-		}, nil
-
+	got := p.check(e)
+	if p.err != nil {
+		return
 	}
-	return &FuncArg{Type: FuncArgFilterQuery, FilterQuery: query}, nil
+	if got == want {
+		return
+	}
+	if got == nodesType && (want == logicalType || want == valueType && e.kind == 'q' && e.path.singular()) {
+		return
+	}
+	p.err = &CompileError{e.offset, "expression has incompatible type"}
 }
 
-func parseInteger(s string) (int, error) {
-	var i int64
-	_, err := fmt.Sscanf(s, "%d", &i)
-	if err != nil {
-		return 0, err
+func (p *parser) check(e *expression) exprType {
+	if p.err != nil {
+		return valueType
 	}
-	return int(i), nil
+	switch e.kind {
+	case 'v':
+		return valueType
+	case 'q':
+		return nodesType
+	case '(', '!':
+		p.require(e.left, logicalType)
+		return logicalType
+	case 'b':
+		p.require(e.left, logicalType)
+		p.require(e.right, logicalType)
+		return logicalType
+	case 'c':
+		p.require(e.left, valueType)
+		p.require(e.right, valueType)
+		return logicalType
+	case 'f':
+		var params []exprType
+		ret := valueType
+		switch e.name {
+		case "length":
+			params = []exprType{valueType}
+		case "count", "value":
+			params = []exprType{nodesType}
+		case "match", "search":
+			params = []exprType{valueType, valueType}
+			ret = logicalType
+		default:
+			p.err = &CompileError{e.offset, "unknown function: " + e.name}
+			return ret
+		}
+		if len(e.args) != len(params) {
+			p.err = &CompileError{e.offset, "wrong number of arguments to " + e.name}
+			return ret
+		}
+		for i, t := range params {
+			p.require(e.args[i], t)
+		}
+		if (e.name == "match" || e.name == "search") && e.args[1].kind == 'v' {
+			e.regexConstant = true
+			if e.args[1].literal.kind == stringKind {
+				re, err := iregexp.Compile(e.args[1].literal.text)
+				if err != nil {
+					if limit, ok := err.(*iregexp.LimitError); ok {
+						p.err = &LimitError{limit.Resource, limit.Limit}
+					}
+				} else {
+					e.regex = re
+				}
+			}
+		}
+		return ret
+	}
+	p.fail("invalid expression")
+	return valueType
 }
