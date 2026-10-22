@@ -10,6 +10,8 @@ import (
 	"github.com/saltfishpr/jsonpath"
 )
 
+var benchmarkSizes = []int{10, 100, 1000, 25000, 100000}
+
 func benchmarkDocument(size int) ([]byte, map[string]int) {
 	rng := rand.New(rand.NewSource(int64(0xC0FFEE ^ size)))
 	categories := []string{"reference", "fiction", "biography", "technical", "poetry"}
@@ -88,7 +90,7 @@ func benchmarkDocument(size int) ([]byte, map[string]int) {
 }
 
 func BenchmarkParse(b *testing.B) {
-	for _, size := range []int{25000, 100000} {
+	for _, size := range benchmarkSizes {
 		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
 			data, _ := benchmarkDocument(size)
 			b.SetBytes(int64(len(data)))
@@ -145,7 +147,7 @@ func BenchmarkCompile(b *testing.B) {
 // Exclude fixture generation, document parsing, and query compilation to match
 // upstream's eval benchmarks. Values includes this API's result-copying cost.
 func BenchmarkQuery(b *testing.B) {
-	for _, size := range []int{25000, 100000} {
+	for _, size := range benchmarkSizes {
 		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
 			data, counts := benchmarkDocument(size)
 			doc, err := jsonpath.Parse(data)

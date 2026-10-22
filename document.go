@@ -52,8 +52,36 @@ func Parse(data []byte) (*Document, error) {
 }
 
 type documentParser struct {
-	s   string
-	pos int
+	s         string
+	pos       int
+	nodes     []jsonNode
+	blockSize int
+}
+
+func (p *documentParser) newNode() *jsonNode {
+	// Keep full blocks near 4 KiB on 64-bit platforms.
+	const maxBlockSize = 24
+	if len(p.nodes) == 0 {
+		// Small initial blocks limit unused space in short documents.
+		if p.blockSize == 0 {
+			p.blockSize = 1
+		} else if p.blockSize < maxBlockSize {
+			p.blockSize *= 2
+			if p.blockSize > maxBlockSize {
+				p.blockSize = maxBlockSize
+			}
+		}
+		size := p.blockSize
+		// Each additional value needs a separator or closing delimiter as well.
+		if remaining := (len(p.s) - p.pos + 1) / 2; size > remaining {
+			size = remaining
+		}
+		// Existing nodes retain their blocks; never grow or reuse a live block.
+		p.nodes = make([]jsonNode, size)
+	}
+	n := &p.nodes[0]
+	p.nodes = p.nodes[1:]
+	return n
 }
 
 func (p *documentParser) skip() {
@@ -67,7 +95,14 @@ func (p *documentParser) value(parent *jsonNode, depth int) (*jsonNode, error) {
 	if p.pos == len(p.s) {
 		return nil, p.fail("expected JSON value")
 	}
-	n := &jsonNode{start: p.pos, parent: parent}
+	var n *jsonNode
+	if parent == nil {
+		// A standalone root needs no block bookkeeping.
+		n = new(jsonNode)
+	} else {
+		n = p.newNode()
+	}
+	n.start, n.parent = p.pos, parent
 	c := p.s[p.pos]
 	switch c {
 	case '{', '[':
