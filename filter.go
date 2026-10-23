@@ -7,24 +7,36 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/document"
 )
 
-func (e *evaluator) evalLogical(expr ast.Expr, cur *document.Node) bool {
+func (e *evaluator) evalLogical(expr ast.Expr, cur *document.Node) (bool, error) {
 	switch v := expr.(type) {
 	case *ast.OrExpr:
 		for _, op := range v.Operands {
-			if e.evalLogical(op, cur) {
-				return true
+			ok, err := e.evalLogical(op, cur)
+			if err != nil {
+				return false, err
+			}
+			if ok {
+				return true, nil
 			}
 		}
-		return false
+		return false, nil
 	case *ast.AndExpr:
 		for _, op := range v.Operands {
-			if !e.evalLogical(op, cur) {
-				return false
+			ok, err := e.evalLogical(op, cur)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				return false, nil
 			}
 		}
-		return true
+		return true, nil
 	case *ast.NotExpr:
-		return !e.evalLogical(v.Operand, cur)
+		ok, err := e.evalLogical(v.Operand, cur)
+		if err != nil {
+			return false, err
+		}
+		return !ok, nil
 	case *ast.ParenExpr:
 		return e.evalLogical(v.Inner, cur)
 	case *ast.ComparisonExpr:
@@ -33,43 +45,57 @@ func (e *evaluator) evalLogical(expr ast.Expr, cur *document.Node) bool {
 		return e.evalTest(v, cur)
 	case *ast.FilterQuery:
 		// LogicalType 形参位置收到子查询时，按 RFC 9535 §2.4.3 转为存在性判定。
-		return len(e.query(v.Query, cur)) > 0
+		nodes, err := e.query(v.Query, cur)
+		if err != nil {
+			return false, err
+		}
+		return len(nodes) > 0, nil
 	case *ast.FunctionCall:
-		r := e.callFunction(v, cur)
+		r, err := e.callFunction(v, cur)
+		if err != nil {
+			return false, err
+		}
 		switch v.Ret {
 		case ast.TypeLogical:
-			return r.logical
+			return r.logical, nil
 		case ast.TypeNodes:
-			return len(r.nodes) > 0
+			return len(r.nodes) > 0, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
-func (e *evaluator) evalTest(t *ast.TestExpr, cur *document.Node) bool {
-	ok := e.evalLogical(t.Target, cur)
+func (e *evaluator) evalTest(t *ast.TestExpr, cur *document.Node) (bool, error) {
+	ok, err := e.evalLogical(t.Target, cur)
+	if err != nil {
+		return false, err
+	}
 	if t.Negated {
 		ok = !ok
 	}
-	return ok
+	return ok, nil
 }
 
 // evalComparable 求值一个 Comparable。第二个返回值为 true 时表示 Nothing
 // （查询无结果或函数返回 Nothing），用以与 JSON null 区分。
-func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (document.Value, bool) {
+func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (document.Value, bool, error) {
 	switch v := c.(type) {
 	case *ast.Literal:
-		return e.literals[v], false
+		return e.literals[v], false, nil
 	case *ast.SingularQuery:
-		return e.evalSingularQuery(v, cur)
+		val, nothing := e.evalSingularQuery(v, cur)
+		return val, nothing, nil
 	case *ast.FunctionCall:
-		r := e.callFunction(v, cur)
-		if r.nothing {
-			return nil, true
+		r, err := e.callFunction(v, cur)
+		if err != nil {
+			return nil, false, err
 		}
-		return r.value, false
+		if r.nothing {
+			return nil, true, nil
+		}
+		return r.value, false, nil
 	}
-	return nil, true
+	return nil, true, nil
 }
 
 func literalValue(l *ast.Literal) document.Value {
@@ -126,47 +152,59 @@ func (e *evaluator) evalSingularQuery(q *ast.SingularQuery, cur *document.Node) 
 	return v, false
 }
 
-func (e *evaluator) evalNodes(expr ast.Expr, cur *document.Node) []document.Value {
+func (e *evaluator) evalNodes(expr ast.Expr, cur *document.Node) ([]document.Value, error) {
 	switch v := expr.(type) {
 	case *ast.FilterQuery:
-		nodes := e.query(v.Query, cur)
+		nodes, err := e.query(v.Query, cur)
+		if err != nil {
+			return nil, err
+		}
 		out := make([]document.Value, len(nodes))
 		for i, n := range nodes {
 			out[i] = n.Value
 		}
-		return out
+		return out, nil
 	case *ast.SingularQuery:
 		if val, nothing := e.evalSingularQuery(v, cur); !nothing {
-			return []document.Value{val}
+			return []document.Value{val}, nil
 		}
-		return nil
+		return nil, nil
 	case *ast.FunctionCall:
-		r := e.callFunction(v, cur)
+		r, err := e.callFunction(v, cur)
+		if err != nil {
+			return nil, err
+		}
 		if v.Ret == ast.TypeNodes {
-			return r.nodes
+			return r.nodes, nil
 		}
 	}
-	return nil
+	return nil, nil
 }
 
-func (e *evaluator) evalComparison(c *ast.ComparisonExpr, cur *document.Node) bool {
-	lv, lNothing := e.evalComparable(c.Left, cur)
-	rv, rNothing := e.evalComparable(c.Right, cur)
+func (e *evaluator) evalComparison(c *ast.ComparisonExpr, cur *document.Node) (bool, error) {
+	lv, lNothing, err := e.evalComparable(c.Left, cur)
+	if err != nil {
+		return false, err
+	}
+	rv, rNothing, err := e.evalComparable(c.Right, cur)
+	if err != nil {
+		return false, err
+	}
 	switch c.Op {
 	case ast.CmpEq:
-		return compareEq(lv, lNothing, rv, rNothing)
+		return compareEq(lv, lNothing, rv, rNothing), nil
 	case ast.CmpNe:
-		return !compareEq(lv, lNothing, rv, rNothing)
+		return !compareEq(lv, lNothing, rv, rNothing), nil
 	case ast.CmpLt:
-		return compareLt(lv, lNothing, rv, rNothing)
+		return compareLt(lv, lNothing, rv, rNothing), nil
 	case ast.CmpLe:
-		return compareLt(lv, lNothing, rv, rNothing) || compareEq(lv, lNothing, rv, rNothing)
+		return compareLt(lv, lNothing, rv, rNothing) || compareEq(lv, lNothing, rv, rNothing), nil
 	case ast.CmpGt:
-		return compareLt(rv, rNothing, lv, lNothing)
+		return compareLt(rv, rNothing, lv, lNothing), nil
 	case ast.CmpGe:
-		return compareLt(rv, rNothing, lv, lNothing) || compareEq(lv, lNothing, rv, rNothing)
+		return compareLt(rv, rNothing, lv, lNothing) || compareEq(lv, lNothing, rv, rNothing), nil
 	}
-	return false
+	return false, nil
 }
 
 // compareEq 实现 RFC 9535 §2.3.5.2.2 的 == 判定。
@@ -242,25 +280,40 @@ func compareLt(a document.Value, aNothing bool, b document.Value, bNothing bool)
 	return false
 }
 
-func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) functionValue {
+func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) (functionValue, error) {
 	def := builtinFunctions[f.Name]
 	args := make([]functionValue, len(f.Args))
 	for i, arg := range f.Args {
-		args[i] = e.prepareArg(arg, def.params[i], cur)
+		var err error
+		args[i], err = e.prepareArg(arg, def.params[i], cur)
+		if err != nil {
+			return functionValue{}, err
+		}
 	}
 	return def.call(e, args)
 }
 
-func (e *evaluator) prepareArg(expr ast.Expr, want ast.ExprType, cur *document.Node) functionValue {
+func (e *evaluator) prepareArg(expr ast.Expr, want ast.ExprType, cur *document.Node) (functionValue, error) {
 	switch want {
 	case ast.TypeValue:
 		// 编译阶段的 adaptArg 已检查类型并转换 singular query，保证此处实现了 Comparable。
-		v, nothing := e.evalComparable(expr.(ast.Comparable), cur)
-		return functionValue{value: v, nothing: nothing}
+		v, nothing, err := e.evalComparable(expr.(ast.Comparable), cur)
+		if err != nil {
+			return functionValue{}, err
+		}
+		return functionValue{value: v, nothing: nothing}, nil
 	case ast.TypeLogical:
-		return functionValue{logical: e.evalLogical(expr, cur)}
+		logical, err := e.evalLogical(expr, cur)
+		if err != nil {
+			return functionValue{}, err
+		}
+		return functionValue{logical: logical}, nil
 	case ast.TypeNodes:
-		return functionValue{nodes: e.evalNodes(expr, cur)}
+		nodes, err := e.evalNodes(expr, cur)
+		if err != nil {
+			return functionValue{}, err
+		}
+		return functionValue{nodes: nodes}, nil
 	default:
 		// 内置函数签名只允许上述三种类型；其他类型表示内部定义违反约束。
 		panic(fmt.Sprintf("jsonpath: invalid function parameter type %v", want))

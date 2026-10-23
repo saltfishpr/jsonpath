@@ -36,8 +36,12 @@ func Compile(src string) (*Query, error) {
 
 // Values 返回匹配节点的原始 JSON 片段，按查询选择顺序保留重复选择。
 // 片段与文档的原始输入共享内存；没有匹配时返回空切片。
+// 函数求值失败时返回错误，不返回部分结果。
 func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
-	nodes := q.run(doc)
+	nodes, err := q.run(doc)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]json.RawMessage, len(nodes))
 	for i, n := range nodes {
 		out[i] = json.RawMessage(n.Value.Raw())
@@ -47,8 +51,12 @@ func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
 
 // Nodes 返回匹配节点及其 Normalized Path，按查询选择顺序保留重复选择。
 // 节点的 Value 与 doc 共享内存；没有匹配时返回空切片。
+// 函数求值失败时返回错误，不返回部分结果。
 func (q *Query) Nodes(doc *Document) ([]Node, error) {
-	nodes := q.run(doc)
+	nodes, err := q.run(doc)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Node, len(nodes))
 	for i, n := range nodes {
 		out[i] = Node{Value: json.RawMessage(n.Value.Raw()), Path: normalizedPath(n)}

@@ -20,7 +20,7 @@ type functionValue struct {
 type functionDefinition struct {
 	params []ast.ExprType
 	result ast.ExprType
-	call   func(*evaluator, []functionValue) functionValue
+	call   func(*evaluator, []functionValue) (functionValue, error)
 }
 
 var builtinFunctions = map[string]functionDefinition{
@@ -31,57 +31,58 @@ var builtinFunctions = map[string]functionDefinition{
 	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical, searchFn},
 }
 
-func lengthFn(_ *evaluator, args []functionValue) functionValue {
+func lengthFn(_ *evaluator, args []functionValue) (functionValue, error) {
 	if !args[0].nothing {
 		switch v := args[0].value.(type) {
 		case document.String:
-			return numberResult(utf8.RuneCountInString(v.V))
+			return numberResult(utf8.RuneCountInString(v.V)), nil
 		case document.Array:
-			return numberResult(v.Len())
+			return numberResult(v.Len()), nil
 		case document.Object:
-			return numberResult(v.MemberCount())
+			return numberResult(v.MemberCount()), nil
 		}
 	}
-	return functionValue{nothing: true}
+	return functionValue{nothing: true}, nil
 }
 
-func countFn(_ *evaluator, args []functionValue) functionValue {
-	return numberResult(len(args[0].nodes))
+func countFn(_ *evaluator, args []functionValue) (functionValue, error) {
+	return numberResult(len(args[0].nodes)), nil
 }
 
-func valueFn(_ *evaluator, args []functionValue) functionValue {
+func valueFn(_ *evaluator, args []functionValue) (functionValue, error) {
 	if len(args[0].nodes) == 1 {
-		return functionValue{value: args[0].nodes[0]}
+		return functionValue{value: args[0].nodes[0]}, nil
 	}
-	return functionValue{nothing: true}
+	return functionValue{nothing: true}, nil
 }
 
-func matchFn(e *evaluator, args []functionValue) functionValue {
+func matchFn(e *evaluator, args []functionValue) (functionValue, error) {
 	return e.matchRegexp(args, false)
 }
 
-func searchFn(e *evaluator, args []functionValue) functionValue {
+func searchFn(e *evaluator, args []functionValue) (functionValue, error) {
 	return e.matchRegexp(args, true)
 }
 
-func (e *evaluator) matchRegexp(args []functionValue, search bool) functionValue {
+func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValue, error) {
 	text, textOK := args[0].value.(document.String)
 	pattern, patternOK := args[1].value.(document.String)
 	if args[0].nothing || args[1].nothing || !textOK || !patternOK {
-		return functionValue{}
+		return functionValue{}, nil
 	}
-	r, cached := e.regexes[pattern.V]
-	if !cached {
-		// Query 的缓存只读，动态模式不写入共享状态。
-		r, _ = iregexp.Compile(pattern.V)
-	}
+	r := e.regexes[pattern.V]
 	if r == nil {
-		return functionValue{}
+		// Query 的缓存只读，动态模式不写入共享状态。
+		var err error
+		r, err = iregexp.Compile(pattern.V)
+		if err != nil {
+			return functionValue{}, err
+		}
 	}
 	if search {
-		return functionValue{logical: r.Search(text.V)}
+		return functionValue{logical: r.Search(text.V)}, nil
 	}
-	return functionValue{logical: r.Match(text.V)}
+	return functionValue{logical: r.Match(text.V)}, nil
 }
 
 func numberResult(n int) functionValue {

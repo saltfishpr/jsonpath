@@ -113,8 +113,11 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 			}
 
 			if _, cached := c.regexes[pattern.Value.Str]; !cached {
-				// 无效模式的结果为 LogicalFalse，nil 缓存避免重复编译。
-				c.regexes[pattern.Value.Str], _ = iregexp.Compile(pattern.Value.Str)
+				r, err := iregexp.Compile(pattern.Value.Str)
+				if err != nil {
+					return err
+				}
+				c.regexes[pattern.Value.Str] = r
 			}
 		}
 	}

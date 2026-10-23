@@ -6,7 +6,7 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-func (q *Query) run(doc *Document) []*document.Node {
+func (q *Query) run(doc *Document) ([]*document.Node, error) {
 	ev := &evaluator{root: doc.root, literals: q.literals, regexes: q.regexes}
 	return ev.query(q.query, doc.root)
 }
@@ -17,44 +17,62 @@ type evaluator struct {
 	regexes  map[string]*iregexp.Regexp
 }
 
-func (e *evaluator) query(q *ast.Query, current *document.Node) []*document.Node {
+func (e *evaluator) query(q *ast.Query, current *document.Node) ([]*document.Node, error) {
 	if q.IsRoot {
 		current = e.root
 	}
 	nodes := []*document.Node{current}
 	for _, seg := range q.Segments {
-		nodes = e.segment(seg, nodes)
+		var err error
+		nodes, err = e.segment(seg, nodes)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return nodes
+	return nodes, nil
 }
 
-func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) []*document.Node {
+func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) ([]*document.Node, error) {
 	var out []*document.Node
 	for _, in := range inputs {
+		var err error
 		switch seg.Kind {
 		case ast.SegChild:
 			for _, sel := range seg.Selectors {
-				out = e.selector(sel, in, out)
+				out, err = e.selector(sel, in, out)
+				if err != nil {
+					return nil, err
+				}
 			}
 		case ast.SegDescendant:
-			out = e.descendants(seg.Selectors, in, out)
+			out, err = e.descendants(seg.Selectors, in, out)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // descendants 按前序访问节点（包含自身），先应用全部 selector，再访问子节点。
-func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out []*document.Node) []*document.Node {
+func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out []*document.Node) ([]*document.Node, error) {
+	var err error
 	for _, sel := range selectors {
-		out = e.selector(sel, in, out)
+		out, err = e.selector(sel, in, out)
+		if err != nil {
+			return nil, err
+		}
 	}
 	for _, child := range in.Children {
-		out = e.descendants(selectors, child, out)
+		out, err = e.descendants(selectors, child, out)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return out
+	return out, nil
 }
 
-func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*document.Node) []*document.Node {
+func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*document.Node) ([]*document.Node, error) {
 	switch s := sel.(type) {
 	case *ast.NameSelector:
 		if obj, ok := in.Value.(document.Object); ok {
@@ -79,12 +97,16 @@ func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*documen
 		out = e.sliceSelector(s, in, out)
 	case *ast.FilterSelector:
 		for _, child := range in.Children {
-			if e.evalLogical(s.Expr, child) {
+			ok, err := e.evalLogical(s.Expr, child)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
 				out = append(out, child)
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out []*document.Node) []*document.Node {
