@@ -122,19 +122,10 @@ type token struct {
 	Pos   ast.Pos
 }
 
-type lexError struct {
-	Pos ast.Pos
-	Msg string
-}
-
-func (e *lexError) Error() string {
-	return fmt.Sprintf("jsonpath: lex error at line %d col %d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
-}
-
 // lex 将查询串切分为 token 列表，末尾包含 tkEOF。
 func lex(src string) ([]token, error) {
 	if !utf8.ValidString(src) {
-		return nil, &lexError{Pos: ast.Pos{Line: 1, Col: 1}, Msg: "query is not valid UTF-8"}
+		return nil, &Error{Pos: ast.Pos{Line: 1, Col: 1}, Msg: "query is not valid UTF-8"}
 	}
 	l := &lexer{src: src, line: 1, col: 1}
 	for {
@@ -178,7 +169,7 @@ func (l *lexer) advance(r rune, w int) {
 }
 
 func (l *lexer) errorf(pos ast.Pos, format string, args ...interface{}) error {
-	return &lexError{Pos: pos, Msg: fmt.Sprintf(format, args...)}
+	return &Error{Pos: pos, Msg: fmt.Sprintf(format, args...)}
 }
 
 func (l *lexer) next() (token, error) {

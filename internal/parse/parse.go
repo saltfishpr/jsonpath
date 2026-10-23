@@ -8,7 +8,7 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/ast"
 )
 
-// Error 表示带源码位置的解析错误。
+// Error 表示带源码位置的词法或语法错误。
 type Error struct {
 	Pos ast.Pos
 	Msg string

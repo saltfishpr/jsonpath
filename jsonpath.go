@@ -5,6 +5,7 @@ package jsonpath
 
 import (
 	"encoding/json"
+	"errors"
 
 	"github.com/saltfishpr/jsonpath/internal/ast"
 	"github.com/saltfishpr/jsonpath/internal/document"
@@ -22,9 +23,14 @@ type Query struct {
 }
 
 // Compile 使用内置函数编译查询串。
+// 查询的词法、语法和语义错误返回 *CompileError。
 func Compile(src string) (*Query, error) {
 	q, err := parse.Parse(src)
 	if err != nil {
+		var parseErr *parse.Error
+		if errors.As(err, &parseErr) {
+			return nil, &CompileError{Offset: parseErr.Pos.Offset, Message: parseErr.Msg}
+		}
 		return nil, err
 	}
 	c := &compiler{}
