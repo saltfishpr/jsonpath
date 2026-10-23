@@ -2,6 +2,7 @@ package document
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -223,14 +224,14 @@ func (d *jsonDecoder) parseString() (Value, error) {
 	if plain {
 		return nil, d.errorf("unterminated string")
 	}
-	var buf []byte
-	buf = append(buf, d.src[runStart:d.off]...)
+	var buf strings.Builder
+	buf.Write(d.src[runStart:d.off])
 	for d.off < len(d.src) {
 		b := d.src[d.off]
 		if b == '"' {
 			raw := d.src[start : d.off+1]
 			d.off++
-			return String{V: string(buf), raw: raw}, nil
+			return String{V: buf.String(), raw: raw}, nil
 		}
 		if b == '\\' {
 			d.off++
@@ -241,27 +242,27 @@ func (d *jsonDecoder) parseString() (Value, error) {
 			d.off++
 			switch esc {
 			case '"':
-				buf = append(buf, '"')
+				buf.WriteByte('"')
 			case '\\':
-				buf = append(buf, '\\')
+				buf.WriteByte('\\')
 			case '/':
-				buf = append(buf, '/')
+				buf.WriteByte('/')
 			case 'b':
-				buf = append(buf, 0x08)
+				buf.WriteByte(0x08)
 			case 'f':
-				buf = append(buf, 0x0C)
+				buf.WriteByte(0x0C)
 			case 'n':
-				buf = append(buf, '\n')
+				buf.WriteByte('\n')
 			case 'r':
-				buf = append(buf, '\r')
+				buf.WriteByte('\r')
 			case 't':
-				buf = append(buf, '\t')
+				buf.WriteByte('\t')
 			case 'u':
 				r, err := d.readUnicodeEscape()
 				if err != nil {
 					return nil, err
 				}
-				buf = utf8.AppendRune(buf, r)
+				buf.WriteRune(r)
 			default:
 				return nil, d.errorf("invalid escape \\%c", esc)
 			}
@@ -270,7 +271,7 @@ func (d *jsonDecoder) parseString() (Value, error) {
 		if b < 0x20 {
 			return nil, d.errorf("unescaped control character U+%04X in string", b)
 		}
-		buf = append(buf, b)
+		buf.WriteByte(b)
 		d.off++
 	}
 	return nil, d.errorf("unterminated string")
