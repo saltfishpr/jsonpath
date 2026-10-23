@@ -1,6 +1,7 @@
 package jsonpath
 
 import (
+	"errors"
 	"strconv"
 	"unicode/utf8"
 
@@ -70,14 +71,19 @@ func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValu
 	if args[0].nothing || args[1].nothing || !textOK || !patternOK {
 		return functionValue{}, nil
 	}
-	r := e.regexes[pattern.V]
-	if r == nil {
+	r, cached := e.regexes[pattern.V]
+	if !cached {
 		// Query 的缓存只读，动态模式不写入共享状态。
 		var err error
 		r, err = iregexp.Compile(pattern.V)
 		if err != nil {
-			return functionValue{}, err
+			if errors.Is(err, iregexp.ErrPatternTooLarge) {
+				return functionValue{}, err
+			}
 		}
+	}
+	if r == nil {
+		return logicalResult(false), nil
 	}
 	if search {
 		return functionValue{logical: r.Search(text.V)}, nil
@@ -87,4 +93,8 @@ func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValu
 
 func numberResult(n int) functionValue {
 	return functionValue{value: document.ParseNumber([]byte(strconv.Itoa(n)))}
+}
+
+func logicalResult(b bool) functionValue {
+	return functionValue{logical: b}
 }

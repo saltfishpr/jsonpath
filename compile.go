@@ -1,6 +1,7 @@
 package jsonpath
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/saltfishpr/jsonpath/internal/ast"
@@ -115,7 +116,11 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 			if _, cached := c.regexes[pattern.Value.Str]; !cached {
 				r, err := iregexp.Compile(pattern.Value.Str)
 				if err != nil {
-					return err
+					if errors.Is(err, iregexp.ErrPatternTooLarge) {
+						return err
+					}
+					// RFC 9535 §2.4.6、§2.4.7 规定：模式不符合 I-Regexp 时，match/search
+					// 的求值结果应为 LogicalFalse，因此此处不将无效模式作为查询编译错误返回。
 				}
 				c.regexes[pattern.Value.Str] = r
 			}
