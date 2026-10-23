@@ -4,59 +4,86 @@ import (
 	"strconv"
 	"unicode/utf8"
 
+	"github.com/saltfishpr/jsonpath/internal/ast"
+	"github.com/saltfishpr/jsonpath/internal/document"
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-func integerValue(n int) *jsonNode {
-	return &jsonNode{kind: numberKind, number: parseDecimal(strconv.Itoa(n))}
+// 字段的有效性由函数签名决定，无需在每个值中重复保存类型。
+type functionValue struct {
+	value   document.Value
+	nothing bool // 区别于 JSON null。
+	logical bool
+	nodes   []document.Value
 }
 
-func (c *evalContext) function(e *expression, n *jsonNode) expressionResult {
-	r := expressionResult{typ: valueType}
-	switch e.name {
-	case "length":
-		v := c.value(e.args[0], n)
-		if v != nil {
-			switch v.kind {
-			case stringKind:
-				r.value = integerValue(utf8.RuneCountInString(v.text))
-			case arrayKind, objectKind:
-				r.value = integerValue(len(v.children))
-			}
-		}
-	case "count":
-		r.value = integerValue(len(c.expression(e.args[0], n).nodes))
-	case "value":
-		nodes := c.expression(e.args[0], n).nodes
-		if len(nodes) == 1 {
-			r.value = nodes[0]
-		}
-	case "match", "search":
-		r.typ = logicalType
-		value, pattern := c.value(e.args[0], n), c.value(e.args[1], n)
-		if value == nil || pattern == nil || value.kind != stringKind || pattern.kind != stringKind {
-			return r
-		}
-		re := e.regex
-		if !e.regexConstant {
-			var ok bool
-			re, ok = c.regex[pattern.text]
-			if !ok {
-				var err error
-				re, err = iregexp.Compile(pattern.text)
-				if limit, ok := err.(*iregexp.LimitError); ok {
-					c.err = &LimitError{limit.Resource, limit.Limit}
-					return r
-				}
-				if c.regex == nil {
-					c.regex = make(map[string]*iregexp.Pattern)
-				}
-				c.regex[pattern.text] = re
-			}
-		}
-		if re != nil {
-			r.logical = re.Match(value.text, e.name == "search")
+type functionDefinition struct {
+	params []ast.ExprType
+	result ast.ExprType
+	call   func(*evaluator, []functionValue) functionValue
+}
+
+var builtinFunctions = map[string]functionDefinition{
+	"length": {[]ast.ExprType{ast.TypeValue}, ast.TypeValue, lengthFn},
+	"count":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue, countFn},
+	"value":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue, valueFn},
+	"match":  {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical, matchFn},
+	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical, searchFn},
+}
+
+func lengthFn(_ *evaluator, args []functionValue) functionValue {
+	if !args[0].nothing {
+		switch v := args[0].value.(type) {
+		case document.String:
+			return numberResult(utf8.RuneCountInString(v.V))
+		case document.Array:
+			return numberResult(v.Len())
+		case document.Object:
+			return numberResult(v.MemberCount())
 		}
 	}
-	return r
+	return functionValue{nothing: true}
+}
+
+func countFn(_ *evaluator, args []functionValue) functionValue {
+	return numberResult(len(args[0].nodes))
+}
+
+func valueFn(_ *evaluator, args []functionValue) functionValue {
+	if len(args[0].nodes) == 1 {
+		return functionValue{value: args[0].nodes[0]}
+	}
+	return functionValue{nothing: true}
+}
+
+func matchFn(e *evaluator, args []functionValue) functionValue {
+	return e.matchRegexp(args, false)
+}
+
+func searchFn(e *evaluator, args []functionValue) functionValue {
+	return e.matchRegexp(args, true)
+}
+
+func (e *evaluator) matchRegexp(args []functionValue, search bool) functionValue {
+	text, textOK := args[0].value.(document.String)
+	pattern, patternOK := args[1].value.(document.String)
+	if args[0].nothing || args[1].nothing || !textOK || !patternOK {
+		return functionValue{}
+	}
+	r, cached := e.regexes[pattern.V]
+	if !cached {
+		// Query 的缓存只读，动态模式不写入共享状态。
+		r, _ = iregexp.Compile(pattern.V)
+	}
+	if r == nil {
+		return functionValue{}
+	}
+	if search {
+		return functionValue{logical: r.Search(text.V)}
+	}
+	return functionValue{logical: r.Match(text.V)}
+}
+
+func numberResult(n int) functionValue {
+	return functionValue{value: document.ParseNumber([]byte(strconv.Itoa(n)))}
 }

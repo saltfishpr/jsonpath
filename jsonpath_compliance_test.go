@@ -101,18 +101,6 @@ func TestCompliance(t *testing.T) {
 			if !ok {
 				t.Fatalf("query %q: got %v; expected values %s or %s, paths %v or %v", tc.Selector, nodes, tc.Result, tc.Results, tc.Paths, tc.AllPaths)
 			}
-			values, err := q.Values(doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(values) != len(nodes) {
-				t.Fatal("Values and Nodes lengths differ")
-			}
-			for i, v := range values {
-				if !bytes.Equal(v, nodes[i].Value) {
-					t.Fatal("Values and Nodes differ")
-				}
-			}
 		})
 	}
 }

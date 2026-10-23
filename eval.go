@@ -1,166 +1,143 @@
 package jsonpath
 
-import "github.com/saltfishpr/jsonpath/internal/iregexp"
+import (
+	"github.com/saltfishpr/jsonpath/internal/ast"
+	"github.com/saltfishpr/jsonpath/internal/document"
+	"github.com/saltfishpr/jsonpath/internal/iregexp"
+)
 
-type evalContext struct {
-	root  *jsonNode
-	err   error
-	regex map[string]*iregexp.Pattern
+func (q *Query) run(doc *Document) []*document.Node {
+	ev := &evaluator{root: doc.root, literals: q.literals, regexes: q.regexes}
+	return ev.query(q.query, doc.root)
 }
 
-// singular evaluates a path already checked by pathExpr.singular without a nodelist.
-func (c *evalContext) singular(p pathExpr, current *jsonNode) *jsonNode {
-	if c.err != nil {
-		return nil
-	}
-	if p.root {
-		current = c.root
-	}
-	for _, seg := range p.segments {
-		if current == nil {
-			return nil
-		}
-		s := seg.selectors[0]
-		if s.kind == 'n' {
-			current = current.members[s.name]
-			continue
-		}
-		if current.kind != arrayKind {
-			return nil
-		}
-		i := s.index
-		if i < 0 {
-			i += int64(len(current.children))
-		}
-		if i < 0 || i >= int64(len(current.children)) {
-			return nil
-		}
-		current = current.children[int(i)]
-	}
-	return current
+type evaluator struct {
+	root     *document.Node
+	literals map[*ast.Literal]document.Value
+	regexes  map[string]*iregexp.Regexp
 }
 
-func (c *evalContext) path(p pathExpr, current *jsonNode) []*jsonNode {
-	if p.singular() {
-		if n := c.singular(p, current); n != nil {
-			return []*jsonNode{n}
-		}
-		return nil
+func (e *evaluator) query(q *ast.Query, current *document.Node) []*document.Node {
+	if q.IsRoot {
+		current = e.root
 	}
-	if p.root {
-		current = c.root
-	}
-	nodes := []*jsonNode{current}
-	for _, seg := range p.segments {
-		var next []*jsonNode
-		for _, n := range nodes {
-			if !seg.descendant {
-				next = c.selectChildren(next, n, seg.selectors)
-				continue
-			}
-			stack := []*jsonNode{n}
-			for len(stack) > 0 && c.err == nil {
-				last := len(stack) - 1
-				n = stack[last]
-				stack = stack[:last]
-				next = c.selectChildren(next, n, seg.selectors)
-				for i := len(n.children) - 1; i >= 0; i-- {
-					stack = append(stack, n.children[i])
-				}
-			}
-		}
-		nodes = next
-		if c.err != nil {
-			break
-		}
+	nodes := []*document.Node{current}
+	for _, seg := range q.Segments {
+		nodes = e.segment(seg, nodes)
 	}
 	return nodes
 }
 
-func (c *evalContext) selectChildren(out []*jsonNode, n *jsonNode, selectors []selector) []*jsonNode {
-	for _, s := range selectors {
-		switch s.kind {
-		case 'n':
-			if child := n.members[s.name]; child != nil {
+func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) []*document.Node {
+	var out []*document.Node
+	for _, in := range inputs {
+		switch seg.Kind {
+		case ast.SegChild:
+			for _, sel := range seg.Selectors {
+				out = e.selector(sel, in, out)
+			}
+		case ast.SegDescendant:
+			out = e.descendants(seg.Selectors, in, out)
+		}
+	}
+	return out
+}
+
+// descendants 按前序访问节点（包含自身），先应用全部 selector，再访问子节点。
+func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out []*document.Node) []*document.Node {
+	for _, sel := range selectors {
+		out = e.selector(sel, in, out)
+	}
+	for _, child := range in.Children {
+		out = e.descendants(selectors, child, out)
+	}
+	return out
+}
+
+func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*document.Node) []*document.Node {
+	switch s := sel.(type) {
+	case *ast.NameSelector:
+		if obj, ok := in.Value.(document.Object); ok {
+			if i, exists := obj.MemberIndex(s.Name); exists {
+				out = append(out, in.Children[i])
+			}
+		}
+	case *ast.WildcardSelector:
+		out = append(out, in.Children...)
+	case *ast.IndexSelector:
+		if _, ok := in.Value.(document.Array); ok {
+			idx := s.Index
+			length := int64(len(in.Children))
+			if idx < 0 {
+				idx += length
+			}
+			if idx >= 0 && idx < length {
+				out = append(out, in.Children[idx])
+			}
+		}
+	case *ast.SliceSelector:
+		out = e.sliceSelector(s, in, out)
+	case *ast.FilterSelector:
+		for _, child := range in.Children {
+			if e.evalLogical(s.Expr, child) {
 				out = append(out, child)
-			}
-		case '*':
-			out = append(out, n.children...)
-		case 'i':
-			if n.kind == arrayKind {
-				i := s.index
-				if i < 0 {
-					i += int64(len(n.children))
-				}
-				if i >= 0 && i < int64(len(n.children)) {
-					out = append(out, n.children[int(i)])
-				}
-			}
-		case 's':
-			if n.kind == arrayKind {
-				out = appendSlice(out, n.children, s)
-			}
-		case '?':
-			for _, child := range n.children {
-				if c.logical(s.filter, child) {
-					out = append(out, child)
-				}
-				if c.err != nil {
-					return out
-				}
 			}
 		}
 	}
 	return out
 }
 
-func appendSlice(out, children []*jsonNode, s selector) []*jsonNode {
-	length := int64(len(children))
+func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out []*document.Node) []*document.Node {
+	if _, ok := in.Value.(document.Array); !ok {
+		return out
+	}
 	step := int64(1)
-	if s.step != nil {
-		step = *s.step
+	if s.Step != nil {
+		step = *s.Step
 	}
 	if step == 0 {
 		return out
 	}
-	clamp := func(v, lo, hi int64) int64 {
-		if v < 0 {
-			v += length
-		}
-		if v < lo {
-			return lo
-		}
-		if v > hi {
-			return hi
-		}
-		return v
+
+	length := int64(len(in.Children))
+	lower, upper := int64(0), length
+	start, end := int64(0), length
+	if step < 0 {
+		lower, upper = -1, length-1
+		start, end = length-1, -1
 	}
+	normalize := func(index int64) int64 {
+		if index < 0 {
+			index += length
+		}
+		if index < lower {
+			return lower
+		}
+		if index > upper {
+			return upper
+		}
+		return index
+	}
+	if s.Start != nil {
+		start = normalize(*s.Start)
+	}
+	if s.End != nil {
+		end = normalize(*s.End)
+	}
+
 	if step > 0 {
-		start, end := int64(0), length
-		if s.start != nil {
-			start = clamp(*s.start, 0, length)
-		}
-		if s.end != nil {
-			end = clamp(*s.end, 0, length)
-		}
 		for i := start; i < end; {
-			out = append(out, children[int(i)])
+			out = append(out, in.Children[i])
+			// 在相加前判断是否到达边界，避免大步长导致整数溢出。
 			if step >= end-i {
 				break
 			}
 			i += step
 		}
 	} else {
-		start, end := length-1, int64(-1)
-		if s.start != nil {
-			start = clamp(*s.start, -1, length-1)
-		}
-		if s.end != nil {
-			end = clamp(*s.end, -1, length-1)
-		}
 		for i := start; i > end; {
-			out = append(out, children[int(i)])
-			if -step >= i-end {
+			out = append(out, in.Children[i])
+			if step <= end-i {
 				break
 			}
 			i += step

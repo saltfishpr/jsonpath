@@ -71,7 +71,7 @@ $.store.book[-1].title                                  // 负索引
 $.store.book[0:10].title                                // 切片
 $.store.book[*].author                                  // wildcard
 $..price                                                // descendant
-$.store.book[?@.price < 10 && @.in_stock].title         // 过滤；数值每次都按精确十进制比较
+$.store.book[?@.price < 10 && @.in_stock].title         // 过滤；数值按精确十进制比较
 $.store.book[?length(@.tags) == 2].title                // length / count / value
 $.store.book[?match(@.title, "Book [0-9]+")].title      // RFC 9485 I-Regexp 全匹配
 $.store.book[?search(@.title, "Go")].title              // RFC 9485 I-Regexp 子串匹配

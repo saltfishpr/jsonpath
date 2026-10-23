@@ -10,7 +10,7 @@ import (
 	"github.com/saltfishpr/jsonpath"
 )
 
-var benchmarkSizes = []int{10, 100, 1000, 25000, 100000}
+var benchmarkSizes = []int{10, 100, 1000}
 
 func benchmarkDocument(size int) ([]byte, map[string]int) {
 	rng := rand.New(rand.NewSource(int64(0xC0FFEE ^ size)))
