@@ -2,6 +2,7 @@ package document
 
 import (
 	"fmt"
+	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
 )
@@ -39,7 +40,7 @@ func ParseWithDepth(data []byte, maxDepth int) (*Node, error) {
 	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
 		return nil, &SyntaxError{Offset: 0, Message: "unexpected byte order mark (U+FEFF)"}
 	}
-	p := &parser{src: data, maxDepth: maxDepth}
+	p := &parser{src: data, maxDepth: maxDepth, nodeBlockSize: 1}
 	p.skipWS()
 	n, err := p.parseValue(0)
 	if err != nil {
@@ -56,6 +57,62 @@ type parser struct {
 	src      []byte
 	pos      int
 	maxDepth int
+
+	nodes         []Node
+	nodeBlockSize int
+
+	scratch []byte
+	text    strings.Builder
+}
+
+func (p *parser) newNode(kind Kind) *Node {
+	if len(p.nodes) == 0 {
+		// 64 位布局下，23 个节点连同分配头可放进 4 KiB 的分配档位。
+		const maxBlockSize = 23
+		size := p.nodeBlockSize
+		p.nodeBlockSize *= 2
+		if p.nodeBlockSize > maxBlockSize {
+			p.nodeBlockSize = maxBlockSize
+		}
+		if remaining := len(p.src) - p.pos + 1; size > remaining {
+			size = remaining
+		}
+		// 已返回的节点仍持有旧块，后续分配必须使用新块。
+		p.nodes = make([]Node, size)
+	}
+	n := &p.nodes[0]
+	p.nodes = p.nodes[1:]
+	n.kind = kind
+	n.index = -1
+	return n
+}
+
+func (p *parser) storeString(raw []byte) string {
+	// 根标量没有后续字符串可共享，直接复制可避免建立字符串块。
+	if len(raw) < 2 || p.pos == len(p.src) {
+		return string(raw)
+	}
+	if len(raw) > p.text.Cap()-p.text.Len() {
+		const maxBlockSize = 4 << 10
+		capacity := p.text.Cap()
+		if capacity > maxBlockSize/2 {
+			capacity = maxBlockSize
+		} else {
+			capacity *= 2
+		}
+		if capacity < len(raw) {
+			capacity = len(raw)
+		}
+		if remaining := len(p.src) - p.pos + len(raw); capacity > remaining {
+			capacity = remaining
+		}
+		// 已返回的字符串引用旧缓冲；换块避免扩容时复制并保留旧内容。
+		p.text.Reset()
+		p.text.Grow(capacity)
+	}
+	start := p.text.Len()
+	p.text.Write(raw)
+	return p.text.String()[start:]
 }
 
 func (p *parser) errf(format string, args ...interface{}) *SyntaxError {
@@ -95,7 +152,9 @@ func (p *parser) parseValue(depth int) (node *Node, err error) {
 		if err != nil {
 			return nil, err
 		}
-		return &Node{kind: KindString, str: s, index: -1}, nil
+		n := p.newNode(KindString)
+		n.str = s
+		return n, nil
 	case c == 't':
 		return p.parseLiteral("true", KindBool, true)
 	case c == 'f':
@@ -114,7 +173,9 @@ func (p *parser) parseLiteral(lit string, kind Kind, b bool) (*Node, error) {
 		return nil, p.errf("invalid literal, expected %q", lit)
 	}
 	p.pos += len(lit)
-	return &Node{kind: kind, boolean: b, index: -1}, nil
+	n := p.newNode(kind)
+	n.boolean = b
+	return n, nil
 }
 
 func (p *parser) parseObject(depth int) (*Node, error) {
@@ -125,7 +186,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 	p.skipWS()
 	if p.pos < len(p.src) && p.src[p.pos] == '}' {
 		p.pos++
-		return &Node{kind: KindObject, index: -1}, nil
+		return p.newNode(KindObject), nil
 	}
 	var members []Member
 	var seen map[string]struct{}
@@ -170,7 +231,8 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 			continue
 		case '}':
 			p.pos++
-			obj := &Node{kind: KindObject, members: members, index: -1}
+			obj := p.newNode(KindObject)
+			obj.members = members
 			for i := range members {
 				members[i].Value.parent = obj
 				members[i].Value.name = members[i].Name
@@ -190,7 +252,7 @@ func (p *parser) parseArray(depth int) (*Node, error) {
 	p.skipWS()
 	if p.pos < len(p.src) && p.src[p.pos] == ']' {
 		p.pos++
-		return &Node{kind: KindArray, index: -1}, nil
+		return p.newNode(KindArray), nil
 	}
 	var arr []*Node
 	for {
@@ -210,7 +272,8 @@ func (p *parser) parseArray(depth int) (*Node, error) {
 			continue
 		case ']':
 			p.pos++
-			arrNode := &Node{kind: KindArray, arr: arr, index: -1}
+			arrNode := p.newNode(KindArray)
+			arrNode.arr = arr
 			for i, el := range arr {
 				el.parent = arrNode
 				el.index = int64(i)
@@ -236,7 +299,7 @@ func (p *parser) parseString() (string, error) {
 			raw := p.src[start:i]
 			p.pos = i + 1
 			if !hasEscape {
-				return string(raw), nil
+				return p.storeString(raw), nil
 			}
 			return p.unescape(raw, start)
 		}
@@ -272,7 +335,10 @@ func (p *parser) parseString() (string, error) {
 
 // start 为 raw[0] 在原始输入中的偏移，用于错误信息。
 func (p *parser) unescape(raw []byte, start int) (string, error) {
-	out := make([]byte, 0, len(raw))
+	out := p.scratch[:0]
+	if cap(out) < len(raw) {
+		out = make([]byte, 0, len(raw))
+	}
 	i := 0
 	for i < len(raw) {
 		c := raw[i]
@@ -364,7 +430,9 @@ func (p *parser) unescape(raw []byte, start int) (string, error) {
 		out = append(out, raw[i:i+size]...)
 		i += size
 	}
-	return string(out), nil
+	// 解码暂存区仅用于本次 Parse，字符串存储复制后可供下一个转义串复用。
+	p.scratch = out[:0]
+	return p.storeString(out), nil
 }
 
 func hex4(b []byte) (rune, bool) {
@@ -389,7 +457,7 @@ func hex4(b []byte) (rune, bool) {
 //
 //	number = [ minus ] int [ frac ] [ exp ]
 //
-// 校验数字文法后，通过 NewNumber 保留原文并缓存精确数值。
+// 校验数字文法后缓存精确数值，原文区间由 parseValue 保留。
 func (p *parser) parseNumber() (*Node, error) {
 	start := p.pos
 	i := p.pos
@@ -436,5 +504,7 @@ func (p *parser) parseNumber() (*Node, error) {
 		}
 	}
 	p.pos = i
-	return NewNumber(string(p.src[start:i])), nil
+	n := p.newNode(KindNumber)
+	n.number = ParseNumber(p.storeString(p.src[start:i]))
+	return n, nil
 }
