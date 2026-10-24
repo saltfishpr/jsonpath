@@ -255,7 +255,9 @@ func compareLt(a *document.Node, aNothing bool, b *document.Node, bNothing bool)
 
 func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) (functionValue, error) {
 	def := builtinFunctions[f.Name]
-	args := make([]functionValue, len(f.Args))
+	// 内置函数最多接收两个参数；直接分派调用可让参数缓冲留在栈上。
+	var storage [2]functionValue
+	args := storage[:len(f.Args)]
 	for i, arg := range f.Args {
 		var err error
 		args[i], err = e.prepareArg(arg, def.params[i], cur)
@@ -263,7 +265,18 @@ func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) (funct
 			return functionValue{}, err
 		}
 	}
-	return def.call(e, args)
+	switch f.Name {
+	case "length":
+		return lengthFn(args)
+	case "count":
+		return countFn(args)
+	case "value":
+		return valueFn(args)
+	case "match", "search":
+		return e.matchRegexp(args, f.Name == "search")
+	default:
+		panic(fmt.Sprintf("jsonpath: unknown builtin function %q", f.Name))
+	}
 }
 
 func (e *evaluator) prepareArg(expr ast.Expr, want ast.ExprType, cur *document.Node) (functionValue, error) {

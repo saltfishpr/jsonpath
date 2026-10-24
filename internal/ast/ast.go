@@ -245,7 +245,7 @@ type SingularSegment struct {
 type FunctionCall struct {
 	Name string
 	Args []Expr
-	Ret  ExprType
+	Ret  ExprType // 函数返回类型，在编译阶段设置。
 	Pos  Pos
 }
 
@@ -259,13 +259,10 @@ func (*SingularQuery) exprNode() {}
 func (*FunctionCall) exprNode()  {}
 func (*FilterQuery) exprNode()   {}
 
-func (*Literal) Type() ExprType       { return TypeValue }
-func (*SingularQuery) Type() ExprType { return TypeValue } // 用作 Comparable 时按 ValueType 对待
-func (f *FunctionCall) Type() ExprType {
-	// parse 阶段 Ret 为零值（TypeValue），compile 阶段覆写。
-	return f.Ret
-}
-func (*FilterQuery) Type() ExprType { return TypeNodes }
+func (*Literal) Type() ExprType        { return TypeValue }
+func (*SingularQuery) Type() ExprType  { return TypeValue } // 用作 Comparable 时按 ValueType 对待
+func (f *FunctionCall) Type() ExprType { return f.Ret }
+func (*FilterQuery) Type() ExprType    { return TypeNodes }
 
 func (n *Literal) Position() Pos       { return n.Pos }
 func (n *SingularQuery) Position() Pos { return n.Pos }

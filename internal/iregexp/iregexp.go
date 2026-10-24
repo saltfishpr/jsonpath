@@ -19,10 +19,13 @@ import (
 	"unicode/utf8"
 )
 
+// Regexp 保存已编译的 I-Regexp，可并发用于全匹配和子串匹配。
 type Regexp struct {
-	src    string
-	search *regexp.Regexp // unanchored (for Search)
-	match  *regexp.Regexp // anchored with \A ... \z (for Match)
+	src       string
+	literal   string
+	isLiteral bool
+	search    *regexp.Regexp // unanchored (for Search)
+	match     *regexp.Regexp // anchored with \A ... \z (for Match)
 }
 
 // ErrPatternTooLarge is returned when translation exceeds the safety limit.
@@ -37,7 +40,7 @@ var ErrNestingTooDeep = errors.New("iregexp: pattern nesting exceeds safety limi
 // to distinguish invalid patterns from implementation limits and backend errors.
 type SyntaxError struct {
 	// Offset is the zero-based byte offset within the pattern.
-	Offset int
+	Offset  int
 	Message string
 }
 
@@ -62,7 +65,8 @@ func Compile(pattern string) (*Regexp, error) {
 	if err != nil {
 		return nil, fmt.Errorf("iregexp: internal RE2 compile error: %w", err)
 	}
-	return &Regexp{src: pattern, search: search, match: match}, nil
+	literal, complete := search.LiteralPrefix()
+	return &Regexp{src: pattern, literal: literal, isLiteral: complete, search: search, match: match}, nil
 }
 
 func MustCompile(pattern string) *Regexp {
@@ -75,10 +79,21 @@ func MustCompile(pattern string) *Regexp {
 
 // Match reports whether s matches the regexp according to the
 // RFC 9485 §4 semantics (boolean full-string match).
-func (r *Regexp) Match(s string) bool { return r.match.MatchString(s) }
+func (r *Regexp) Match(s string) bool {
+	// 非法 UTF-8 必须保留 regexp 将其视作 RuneError 的语义。
+	if r.isLiteral && utf8.ValidString(s) {
+		return s == r.literal
+	}
+	return r.match.MatchString(s)
+}
 
 // Search reports whether any substring of s matches the regexp.
-func (r *Regexp) Search(s string) bool { return r.search.MatchString(s) }
+func (r *Regexp) Search(s string) bool {
+	if r.isLiteral && utf8.ValidString(s) {
+		return strings.Contains(s, r.literal)
+	}
+	return r.search.MatchString(s)
+}
 
 func (r *Regexp) String() string { return r.src }
 

@@ -20,18 +20,17 @@ type functionValue struct {
 type functionDefinition struct {
 	params []ast.ExprType
 	result ast.ExprType
-	call   func(*evaluator, []functionValue) (functionValue, error)
 }
 
 var builtinFunctions = map[string]functionDefinition{
-	"length": {[]ast.ExprType{ast.TypeValue}, ast.TypeValue, lengthFn},
-	"count":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue, countFn},
-	"value":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue, valueFn},
-	"match":  {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical, matchFn},
-	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical, searchFn},
+	"length": {[]ast.ExprType{ast.TypeValue}, ast.TypeValue},
+	"count":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
+	"value":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
+	"match":  {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
+	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
 }
 
-func lengthFn(_ *evaluator, args []functionValue) (functionValue, error) {
+func lengthFn(args []functionValue) (functionValue, error) {
 	if !args[0].nothing {
 		if length := args[0].value.Len(); length >= 0 {
 			return numberResult(length), nil
@@ -40,23 +39,15 @@ func lengthFn(_ *evaluator, args []functionValue) (functionValue, error) {
 	return functionValue{nothing: true}, nil
 }
 
-func countFn(_ *evaluator, args []functionValue) (functionValue, error) {
+func countFn(args []functionValue) (functionValue, error) {
 	return numberResult(len(args[0].nodes)), nil
 }
 
-func valueFn(_ *evaluator, args []functionValue) (functionValue, error) {
+func valueFn(args []functionValue) (functionValue, error) {
 	if len(args[0].nodes) == 1 {
 		return functionValue{value: args[0].nodes[0]}, nil
 	}
 	return functionValue{nothing: true}, nil
-}
-
-func matchFn(e *evaluator, args []functionValue) (functionValue, error) {
-	return e.matchRegexp(args, false)
-}
-
-func searchFn(e *evaluator, args []functionValue) (functionValue, error) {
-	return e.matchRegexp(args, true)
 }
 
 func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValue, error) {

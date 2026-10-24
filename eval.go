@@ -34,6 +34,10 @@ func (e *evaluator) query(q *ast.Query, current *document.Node) ([]*document.Nod
 
 func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) ([]*document.Node, error) {
 	var out []*document.Node
+	if len(inputs) == 1 {
+		// 单个输入会在循环开始时复制到 in，复用切片不会覆盖尚未读取的节点。
+		out = inputs[:0]
+	}
 	for _, in := range inputs {
 		var err error
 		switch seg.Kind {
