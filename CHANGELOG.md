@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/saltfishpr/jsonpath/compare/v1.1.0...v1.1.1) (2026-10-24)
+
+
+### Performance Improvements
+
+* **document:** reduce parser allocations ([3573381](https://github.com/saltfishpr/jsonpath/commit/357338191b8afe12beed2fb6bb14f29f12a0827f))
+
 ## [1.1.0](https://github.com/saltfishpr/jsonpath/compare/v1.0.1...v1.1.0) (2026-10-24)
 
 
