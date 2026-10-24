@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0](https://github.com/saltfishpr/jsonpath/compare/v1.0.1...v1.1.0) (2026-10-24)
+
+
+### Features
+
+* compile queries with typed AST and shared document values ([73154e5](https://github.com/saltfishpr/jsonpath/commit/73154e55e256610e47ffbc9a6b714fec182b4292))
+* compile queries with typed AST and shared document values ([e91834b](https://github.com/saltfishpr/jsonpath/commit/e91834bae6f69f100f99c170f1ab40aae7fbb055))
+
+
+### Bug Fixes
+
+* return CompileError for lexical and syntax errors ([614c151](https://github.com/saltfishpr/jsonpath/commit/614c1512640890d33b63ad3c0f3455c45e3d5e91))
+* return false for invalid match and search regex patterns ([1826219](https://github.com/saltfishpr/jsonpath/commit/1826219c18c59979f58b1cd936e57a7bf97b207b))
+
+
+### Performance Improvements
+
+* reduce query allocations and optimize literal regex ([d8a57fd](https://github.com/saltfishpr/jsonpath/commit/d8a57fd8514c773b5491e39d23f0fd267603ed12))
+
 ## [1.0.1](https://github.com/saltfishpr/jsonpath/compare/v1.0.0...v1.0.1) (2026-10-22)
 
 
