@@ -1,394 +1,134 @@
+// Package document 提供只读 JSON 节点树及保留原始文本的解析器。
 package document
 
 import (
-	"fmt"
-	"strings"
-	"unicode/utf16"
 	"unicode/utf8"
 )
 
-// Error 表示 JSON 解析失败；Offset 是相对于输入起点的字节偏移。
-type Error struct {
-	Offset  int
-	Message string
+type Kind uint8
+
+const (
+	KindNull Kind = iota
+	KindBool
+	KindNumber
+	KindString
+	KindArray
+	KindObject
+)
+
+// String 返回种类名，便于调试与错误信息。
+func (k Kind) String() string {
+	switch k {
+	case KindNull:
+		return "null"
+	case KindBool:
+		return "bool"
+	case KindNumber:
+		return "number"
+	case KindString:
+		return "string"
+	case KindArray:
+		return "array"
+	case KindObject:
+		return "object"
+	}
+	return "unknown"
 }
 
-func (e *Error) Error() string {
-	return fmt.Sprintf("jsonpath: parse json at offset %d: %s", e.Offset, e.Message)
+// Member 是对象的一条键值对；Name 已解码，Value 带有用于重建路径的父节点信息。
+type Member struct {
+	Name  string
+	Value *Node
 }
 
-// Node 保存 JSON 值、父子关系和路径段。
+// Node 是只读 JSON 值；解析完成后可安全地并发复用。
+//
+// parent、index 和 name 保存节点位置，用于重建 RFC 9535 Normalized Path：根节点没有
+// parent；对象成员保存父对象和键名；数组元素保存父数组和下标。
+//
+// 每个节点都需要独立的 parent 链，因此 null、true 和 false 节点也不共享单例。
 type Node struct {
-	Value Value
-	Step  NormalStep
+	kind Kind
 
-	Parent   *Node
-	Children []*Node
+	raw     []byte   // 保留原始输入中的片段，供查询结果直接引用
+	boolean bool     // KindBool
+	number  Number   // KindNumber: 构造时解析，之后只读
+	str     string   // KindString: 已解码的 UTF-8
+	arr     []*Node  // KindArray
+	members []Member // KindObject，按出现顺序存储
+
+	parent *Node  // 所属容器；根节点为 nil
+	index  int64  // 在父数组中的下标；非数组元素为 -1
+	name   string // 在父对象中的键名；非对象成员为空字符串
 }
 
-// Parse 解析 JSON 并返回根节点；节点与 data 共享底层字节，调用方不应修改它们。
-func Parse(data []byte) (*Node, error) {
-	d := &jsonDecoder{src: data}
-	d.skipWS()
-	root, err := d.parseNode(nil, NormalStep{})
-	if err != nil {
-		return nil, err
-	}
-	d.skipWS()
-	if d.off != len(data) {
-		return nil, d.errorf("unexpected trailing data")
-	}
-	return root, nil
+func NewNull() *Node  { return &Node{kind: KindNull, index: -1} }
+func NewTrue() *Node  { return &Node{kind: KindBool, boolean: true, index: -1} }
+func NewFalse() *Node { return &Node{kind: KindBool, boolean: false, index: -1} }
+
+func NewNumber(number string) *Node {
+	return &Node{kind: KindNumber, number: ParseNumber(number), index: -1}
 }
 
-type jsonDecoder struct {
-	src         []byte
-	off         int
-	unusedNodes []Node
-	blockSize   int
+func NewString(s string) *Node {
+	return &Node{kind: KindString, str: s, index: -1}
 }
 
-func (d *jsonDecoder) newNode(parent *Node, step NormalStep) *Node {
-	if len(d.unusedNodes) == 0 {
-		// 已发布的节点地址必须稳定；分配新块而不扩容或复用已有块。
-		if d.blockSize == 0 {
-			d.blockSize = 1
-		} else if d.blockSize < 64 {
-			d.blockSize *= 2
-		}
-		d.unusedNodes = make([]Node, d.blockSize)
+func (n *Node) Kind() Kind { return n.kind }
+
+func (n *Node) IsNull() bool { return n != nil && n.kind == KindNull }
+
+// Raw 返回与输入共享内存的 JSON 原文，调用方不得修改；手工构造的节点返回 nil。
+func (n *Node) Raw() []byte { return n.raw }
+
+// Bool 返回布尔值；调用方应先检查 KindBool。
+func (n *Node) Bool() bool { return n.boolean }
+
+// Number 返回数字原文；调用方应先检查 KindNumber。
+func (n *Node) Number() Number { return n.number }
+
+// String 返回解码后的字符串；调用方应先检查 KindString。
+func (n *Node) String() string { return n.str }
+
+// Array 返回只读的数组元素切片；其余种类返回 nil，调用方不得修改切片。
+func (n *Node) Array() []*Node { return n.arr }
+
+// Members 返回按输入顺序排列的只读对象成员切片；其余种类返回 nil。
+// 调用方不得修改切片或其中的 Member。
+func (n *Node) Members() []Member { return n.members }
+
+// Len 返回数组元素数、对象成员数或字符串的 Unicode 码点数；其余种类返回 -1。
+// 字符串按码点计数，与 RFC 9535 的 length() 语义一致。
+func (n *Node) Len() int {
+	if n == nil {
+		return -1
 	}
-	node := &d.unusedNodes[0]
-	d.unusedNodes = d.unusedNodes[1:]
-	node.Parent = parent
-	node.Step = step
-	return node
+	switch n.kind {
+	case KindArray:
+		return len(n.arr)
+	case KindObject:
+		return len(n.members)
+	case KindString:
+		return utf8.RuneCountInString(n.str)
+	}
+	return -1
 }
 
-func (d *jsonDecoder) errorf(format string, args ...interface{}) error {
-	return &Error{Offset: d.off, Message: fmt.Sprintf(format, args...)}
+// Get 返回指定名称的对象成员值；非对象节点或成员不存在时返回 nil。
+func (n *Node) Get(name string) *Node {
+	for _, member := range n.members {
+		if member.Name == name {
+			return member.Value
+		}
+	}
+	return nil
 }
 
-func (d *jsonDecoder) skipWS() {
-	for d.off < len(d.src) {
-		switch d.src[d.off] {
-		case ' ', '\t', '\n', '\r':
-			d.off++
-		default:
-			return
-		}
-	}
-}
+// Parent 返回所属容器；根节点返回 nil。
+func (n *Node) Parent() *Node { return n.parent }
 
-func (d *jsonDecoder) parseNode(parent *Node, step NormalStep) (*Node, error) {
-	if d.off >= len(d.src) {
-		return nil, d.errorf("unexpected end of input")
-	}
-	node := d.newNode(parent, step)
-	var err error
-	switch c := d.src[d.off]; {
-	case c == '{':
-		node.Value, err = d.parseObject(node)
-	case c == '[':
-		node.Value, err = d.parseArray(node)
-	case c == '"':
-		node.Value, err = d.parseString()
-	case c == 't' || c == 'f':
-		node.Value, err = d.parseBool()
-	case c == 'n':
-		node.Value, err = d.parseNull()
-	case c == '-' || (c >= '0' && c <= '9'):
-		node.Value, err = d.parseNumber()
-	default:
-		return nil, d.errorf("unexpected character %q", c)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return node, nil
-}
+// Index 返回在父数组中的下标；非数组元素返回 -1。
+func (n *Node) Index() int64 { return n.index }
 
-func (d *jsonDecoder) parseObject(node *Node) (Value, error) {
-	start := d.off
-	d.off++
-	o := Object{index: map[string]int{}}
-	d.skipWS()
-	if d.off < len(d.src) && d.src[d.off] == '}' {
-		d.off++
-		o.raw = d.src[start:d.off]
-		return o, nil
-	}
-	for {
-		d.skipWS()
-		if d.off >= len(d.src) || d.src[d.off] != '"' {
-			return nil, d.errorf("expected string key")
-		}
-		k, err := d.parseString()
-		if err != nil {
-			return nil, err
-		}
-		key := k.(String).V
-		d.skipWS()
-		if d.off >= len(d.src) || d.src[d.off] != ':' {
-			return nil, d.errorf("expected ':' after key")
-		}
-		d.off++
-		d.skipWS()
-		child, err := d.parseNode(node, NameStep(key))
-		if err != nil {
-			return nil, err
-		}
-		o.Keys = append(o.Keys, key)
-		o.Values = append(o.Values, child.Value)
-		o.index[key] = len(o.Keys) - 1
-		node.Children = append(node.Children, child)
-		d.skipWS()
-		if d.off >= len(d.src) {
-			return nil, d.errorf("unterminated object")
-		}
-		switch d.src[d.off] {
-		case ',':
-			d.off++
-			continue
-		case '}':
-			d.off++
-			o.raw = d.src[start:d.off]
-			return o, nil
-		}
-		return nil, d.errorf("expected ',' or '}' in object")
-	}
-}
-
-func (d *jsonDecoder) parseArray(node *Node) (Value, error) {
-	start := d.off
-	d.off++
-	a := Array{}
-	d.skipWS()
-	if d.off < len(d.src) && d.src[d.off] == ']' {
-		d.off++
-		a.raw = d.src[start:d.off]
-		return a, nil
-	}
-	for {
-		d.skipWS()
-		child, err := d.parseNode(node, IndexStep(int64(len(a.Items))))
-		if err != nil {
-			return nil, err
-		}
-		a.Items = append(a.Items, child.Value)
-		node.Children = append(node.Children, child)
-		d.skipWS()
-		if d.off >= len(d.src) {
-			return nil, d.errorf("unterminated array")
-		}
-		switch d.src[d.off] {
-		case ',':
-			d.off++
-			continue
-		case ']':
-			d.off++
-			a.raw = d.src[start:d.off]
-			return a, nil
-		}
-		return nil, d.errorf("expected ',' or ']' in array")
-	}
-}
-
-// parseString 读取一个 JSON 字符串字面量；调用方需保证当前位置是起始的 '"'。
-func (d *jsonDecoder) parseString() (Value, error) {
-	start := d.off
-	d.off++
-	// 不含转义时，直接把原文切片作为解码结果，省去逐字符复制。
-	plain := true
-	runStart := d.off
-	for d.off < len(d.src) {
-		b := d.src[d.off]
-		if b == '"' {
-			if plain {
-				raw := d.src[start : d.off+1]
-				val := string(d.src[runStart:d.off])
-				d.off++
-				return String{V: val, raw: raw}, nil
-			}
-			break
-		}
-		if b == '\\' {
-			plain = false
-			break
-		}
-		if b < 0x20 {
-			return nil, d.errorf("unescaped control character U+%04X in string", b)
-		}
-		d.off++
-	}
-	if plain {
-		return nil, d.errorf("unterminated string")
-	}
-	var buf strings.Builder
-	buf.Write(d.src[runStart:d.off])
-	for d.off < len(d.src) {
-		b := d.src[d.off]
-		if b == '"' {
-			raw := d.src[start : d.off+1]
-			d.off++
-			return String{V: buf.String(), raw: raw}, nil
-		}
-		if b == '\\' {
-			d.off++
-			if d.off >= len(d.src) {
-				return nil, d.errorf("unterminated escape")
-			}
-			esc := d.src[d.off]
-			d.off++
-			switch esc {
-			case '"':
-				buf.WriteByte('"')
-			case '\\':
-				buf.WriteByte('\\')
-			case '/':
-				buf.WriteByte('/')
-			case 'b':
-				buf.WriteByte(0x08)
-			case 'f':
-				buf.WriteByte(0x0C)
-			case 'n':
-				buf.WriteByte('\n')
-			case 'r':
-				buf.WriteByte('\r')
-			case 't':
-				buf.WriteByte('\t')
-			case 'u':
-				r, err := d.readUnicodeEscape()
-				if err != nil {
-					return nil, err
-				}
-				buf.WriteRune(r)
-			default:
-				return nil, d.errorf("invalid escape \\%c", esc)
-			}
-			continue
-		}
-		if b < 0x20 {
-			return nil, d.errorf("unescaped control character U+%04X in string", b)
-		}
-		buf.WriteByte(b)
-		d.off++
-	}
-	return nil, d.errorf("unterminated string")
-}
-
-func (d *jsonDecoder) readUnicodeEscape() (rune, error) {
-	hi, err := d.readHex4()
-	if err != nil {
-		return 0, err
-	}
-	if utf16.IsSurrogate(hi) {
-		// 高位代理必须紧接着低位代理的 \u 转义。
-		if d.off+6 > len(d.src) || d.src[d.off] != '\\' || d.src[d.off+1] != 'u' {
-			return 0, d.errorf("unpaired surrogate in \\u escape")
-		}
-		d.off += 2
-		lo, err := d.readHex4()
-		if err != nil {
-			return 0, err
-		}
-		r := utf16.DecodeRune(hi, lo)
-		if r == utf8.RuneError {
-			return 0, d.errorf("invalid surrogate pair")
-		}
-		return r, nil
-	}
-	return hi, nil
-}
-
-func (d *jsonDecoder) readHex4() (rune, error) {
-	if d.off+4 > len(d.src) {
-		return 0, d.errorf("truncated \\u escape")
-	}
-	var v rune
-	for i := 0; i < 4; i++ {
-		c := d.src[d.off+i]
-		var dgt rune
-		switch {
-		case c >= '0' && c <= '9':
-			dgt = rune(c - '0')
-		case c >= 'a' && c <= 'f':
-			dgt = rune(c-'a') + 10
-		case c >= 'A' && c <= 'F':
-			dgt = rune(c-'A') + 10
-		default:
-			return 0, d.errorf("invalid hex digit %q in \\u escape", c)
-		}
-		v = v<<4 | dgt
-	}
-	d.off += 4
-	return v, nil
-}
-
-func (d *jsonDecoder) parseBool() (Value, error) {
-	start := d.off
-	switch {
-	case d.off+4 <= len(d.src) && string(d.src[d.off:d.off+4]) == "true":
-		d.off += 4
-		return Bool{V: true, raw: d.src[start:d.off]}, nil
-	case d.off+5 <= len(d.src) && string(d.src[d.off:d.off+5]) == "false":
-		d.off += 5
-		return Bool{V: false, raw: d.src[start:d.off]}, nil
-	}
-	return nil, d.errorf("invalid literal")
-}
-
-func (d *jsonDecoder) parseNull() (Value, error) {
-	start := d.off
-	if d.off+4 > len(d.src) || string(d.src[d.off:d.off+4]) != "null" {
-		return nil, d.errorf("invalid literal")
-	}
-	d.off += 4
-	return Null{raw: d.src[start:d.off]}, nil
-}
-
-func (d *jsonDecoder) parseNumber() (Value, error) {
-	start := d.off
-	if d.src[d.off] == '-' {
-		d.off++
-	}
-	if d.off >= len(d.src) {
-		return nil, d.errorf("truncated number")
-	}
-	switch c := d.src[d.off]; {
-	case c == '0':
-		d.off++
-	case c >= '1' && c <= '9':
-		for d.off < len(d.src) && d.src[d.off] >= '0' && d.src[d.off] <= '9' {
-			d.off++
-		}
-	default:
-		return nil, d.errorf("invalid number")
-	}
-	if d.off < len(d.src) && d.src[d.off] == '.' {
-		d.off++
-		cnt := 0
-		for d.off < len(d.src) && d.src[d.off] >= '0' && d.src[d.off] <= '9' {
-			d.off++
-			cnt++
-		}
-		if cnt == 0 {
-			return nil, d.errorf("fractional part requires at least one digit")
-		}
-	}
-	if d.off < len(d.src) && (d.src[d.off] == 'e' || d.src[d.off] == 'E') {
-		d.off++
-		if d.off < len(d.src) && (d.src[d.off] == '+' || d.src[d.off] == '-') {
-			d.off++
-		}
-		cnt := 0
-		for d.off < len(d.src) && d.src[d.off] >= '0' && d.src[d.off] <= '9' {
-			d.off++
-			cnt++
-		}
-		if cnt == 0 {
-			return nil, d.errorf("exponent requires at least one digit")
-		}
-	}
-	return ParseNumber(d.src[start:d.off]), nil
-}
+// Name 返回父对象中的键名；其他节点返回空字符串，空键名需结合 Parent 判断。
+func (n *Node) Name() string { return n.name }

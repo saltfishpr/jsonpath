@@ -76,9 +76,8 @@ func (e *evaluator) evalTest(t *ast.TestExpr, cur *document.Node) (bool, error) 
 	return ok, nil
 }
 
-// evalComparable 求值一个 Comparable。第二个返回值为 true 时表示 Nothing
-// （查询无结果或函数返回 Nothing），用以与 JSON null 区分。
-func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (document.Value, bool, error) {
+// 第二个返回值为 true 时表示 Nothing，用以与 JSON null 区分。
+func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (*document.Node, bool, error) {
 	switch v := c.(type) {
 	case *ast.Literal:
 		return e.literals[v], false, nil
@@ -98,26 +97,27 @@ func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (docume
 	return nil, true, nil
 }
 
-func literalValue(l *ast.Literal) document.Value {
+func literalValue(l *ast.Literal) *document.Node {
 	switch l.Value.Kind {
 	case ast.LitNull:
-		return document.Null{}
+		return document.NewNull()
 	case ast.LitBool:
-		return document.Bool{V: l.Value.Bool}
+		if l.Value.Bool {
+			return document.NewTrue()
+		}
+		return document.NewFalse()
 	case ast.LitInt, ast.LitFloat:
-		return document.ParseNumber([]byte(l.Value.Raw))
+		return document.NewNumber(l.Value.Raw)
 	case ast.LitString:
-		return document.String{V: l.Value.Str}
+		return document.NewString(l.Value.Str)
 	}
-	return document.Null{}
+	return document.NewNull()
 }
 
-func (e *evaluator) evalSingularQuery(q *ast.SingularQuery, cur *document.Node) (document.Value, bool) {
-	var v document.Value
+func (e *evaluator) evalSingularQuery(q *ast.SingularQuery, cur *document.Node) (*document.Node, bool) {
+	v := cur
 	if q.IsRoot {
-		v = e.root.Value
-	} else {
-		v = cur.Value
+		v = e.root
 	}
 	for _, s := range q.Segments {
 		if v == nil {
@@ -125,48 +125,31 @@ func (e *evaluator) evalSingularQuery(q *ast.SingularQuery, cur *document.Node) 
 		}
 		switch {
 		case s.Name != nil:
-			obj, ok := v.(document.Object)
-			if !ok {
-				return nil, true
-			}
-			val, ok := obj.Get(*s.Name)
-			if !ok {
-				return nil, true
-			}
-			v = val
+			v = v.Get(*s.Name)
 		case s.Index != nil:
-			arr, ok := v.(document.Array)
-			if !ok {
+			if v.Kind() != document.KindArray {
 				return nil, true
 			}
 			idx := *s.Index
 			if idx < 0 {
-				idx += int64(arr.Len())
+				idx += int64(v.Len())
 			}
-			if idx < 0 || idx >= int64(arr.Len()) {
+			if idx < 0 || idx >= int64(v.Len()) {
 				return nil, true
 			}
-			v = arr.Items[idx]
+			v = v.Array()[idx]
 		}
 	}
-	return v, false
+	return v, v == nil
 }
 
-func (e *evaluator) evalNodes(expr ast.Expr, cur *document.Node) ([]document.Value, error) {
+func (e *evaluator) evalNodes(expr ast.Expr, cur *document.Node) ([]*document.Node, error) {
 	switch v := expr.(type) {
 	case *ast.FilterQuery:
-		nodes, err := e.query(v.Query, cur)
-		if err != nil {
-			return nil, err
-		}
-		out := make([]document.Value, len(nodes))
-		for i, n := range nodes {
-			out[i] = n.Value
-		}
-		return out, nil
+		return e.query(v.Query, cur)
 	case *ast.SingularQuery:
 		if val, nothing := e.evalSingularQuery(v, cur); !nothing {
-			return []document.Value{val}, nil
+			return []*document.Node{val}, nil
 		}
 		return nil, nil
 	case *ast.FunctionCall:
@@ -207,51 +190,42 @@ func (e *evaluator) evalComparison(c *ast.ComparisonExpr, cur *document.Node) (b
 	return false, nil
 }
 
-// compareEq 实现 RFC 9535 §2.3.5.2.2 的 == 判定。
-func compareEq(a document.Value, aNothing bool, b document.Value, bNothing bool) bool {
+func compareEq(a *document.Node, aNothing bool, b *document.Node, bNothing bool) bool {
 	if aNothing || bNothing {
 		return aNothing && bNothing
 	}
-	if a == nil && b == nil {
-		return true
+	if a == nil || b == nil {
+		return a == b
 	}
 	if a.Kind() != b.Kind() {
 		return false
 	}
-	switch av := a.(type) {
-	case document.Null:
+	switch a.Kind() {
+	case document.KindNull:
 		return true
-	case document.Bool:
-		return av.V == b.(document.Bool).V
-	case document.String:
-		return av.V == b.(document.String).V
-	case document.Number:
-		return av.Cmp(b.(document.Number)) == 0
-	case document.Array:
-		bv := b.(document.Array)
-		if av.Len() != bv.Len() {
+	case document.KindBool:
+		return a.Bool() == b.Bool()
+	case document.KindString:
+		return a.String() == b.String()
+	case document.KindNumber:
+		return a.Number().Cmp(b.Number()) == 0
+	case document.KindArray:
+		if a.Len() != b.Len() {
 			return false
 		}
-		for i := range av.Items {
-			if !compareEq(av.Items[i], false, bv.Items[i], false) {
+		for i, child := range a.Array() {
+			if !compareEq(child, false, b.Array()[i], false) {
 				return false
 			}
 		}
 		return true
-	case document.Object:
-		bv := b.(document.Object)
-		// 按 RFC 9535 §2.3.5.2.2，对象比较是成员集合的集合比较；重复键不影响集合大小。
-		// Get 对重复键返回最后一次出现的值，此处用 index 映射保持一致语义。
-		if av.MemberCount() != bv.MemberCount() {
+	case document.KindObject:
+		if a.Len() != b.Len() {
 			return false
 		}
-		for _, k := range av.Keys {
-			i, _ := av.MemberIndex(k)
-			j, ok := bv.MemberIndex(k)
-			if !ok {
-				return false
-			}
-			if !compareEq(av.Values[i], false, bv.Values[j], false) {
+		for _, member := range a.Members() {
+			right := b.Get(member.Name)
+			if right == nil || !compareEq(member.Value, false, right, false) {
 				return false
 			}
 		}
@@ -260,8 +234,7 @@ func compareEq(a document.Value, aNothing bool, b document.Value, bNothing bool)
 	return false
 }
 
-// compareLt 实现 RFC 9535 §2.3.5.2.3 的 < 判定。
-func compareLt(a document.Value, aNothing bool, b document.Value, bNothing bool) bool {
+func compareLt(a *document.Node, aNothing bool, b *document.Node, bNothing bool) bool {
 	if aNothing || bNothing {
 		return false
 	}
@@ -271,11 +244,11 @@ func compareLt(a document.Value, aNothing bool, b document.Value, bNothing bool)
 	if a.Kind() != b.Kind() {
 		return false
 	}
-	switch av := a.(type) {
-	case document.Number:
-		return av.Cmp(b.(document.Number)) < 0
-	case document.String:
-		return av.V < b.(document.String).V
+	switch a.Kind() {
+	case document.KindNumber:
+		return a.Number().Cmp(b.Number()) < 0
+	case document.KindString:
+		return a.String() < b.String()
 	}
 	return false
 }

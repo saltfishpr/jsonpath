@@ -2,68 +2,56 @@
 // 查询和表达式节点保留源码位置，供编译器报告错误。
 package ast
 
-// Pos 是 AST 节点在原始查询串中的源码位置。
 type Pos struct {
 	Offset int // 从 0 开始的字节偏移
 	Line   int // 从 1 开始的行号
 	Col    int // 从 1 开始的列号，按 rune 计数
 }
 
-// Query 表示一个 JSONPath 查询。
 type Query struct {
 	IsRoot   bool // true 表示根查询（$），false 表示当前节点查询（@）
 	Segments []Segment
 	Pos      Pos
 }
 
-// SegmentKind 标识 child 或 descendant 段。
 type SegmentKind uint8
 
 const (
-	// SegChild identifies a child segment.
 	SegChild SegmentKind = iota
-	// SegDescendant identifies a descendant segment.
 	SegDescendant
 )
 
-// Segment 表示一个 child 或 descendant 段。
 type Segment struct {
 	Kind      SegmentKind
 	Selectors []Selector // 至少一个
 	Pos       Pos
 }
 
-// Selector 是括号段中出现的 selector：name / wildcard / index / slice / filter。
 type Selector interface {
 	selectorNode()
 	Position() Pos
 }
 
-// NameSelector 对应 'foo' / "foo" / .foo。
 type NameSelector struct {
 	Name string // 解码后的 UTF-8 字符串
 	Raw  string // 原文（含引号或点号后的 member-name-shorthand）
 	Pos  Pos
 }
 
-// WildcardSelector 对应 * / .*。
 type WildcardSelector struct {
 	Pos Pos
 }
 
-// IndexSelector 对应 42 / -1。
 type IndexSelector struct {
 	Index int64
 	Pos   Pos
 }
 
-// SliceSelector 对应 start:end:step，三者都可省略。
 type SliceSelector struct {
 	Start, End, Step *int64
 	Pos              Pos
 }
 
-// FilterSelector 对应 ?logical-expr。
 type FilterSelector struct {
 	Expr LogicalExpr
 	Pos  Pos
@@ -106,7 +94,6 @@ func (t ExprType) String() string {
 	return "unknown"
 }
 
-// Expr 是 filter 中所有表达式的父接口。
 type Expr interface {
 	exprNode()
 	Type() ExprType
@@ -126,19 +113,16 @@ type Comparable interface {
 	comparable()
 }
 
-// OrExpr 是扁平化的 ||。
 type OrExpr struct {
 	Operands []LogicalExpr // 长度 >= 2
 	Pos      Pos
 }
 
-// AndExpr 是扁平化的 &&。
 type AndExpr struct {
 	Operands []LogicalExpr // 长度 >= 2
 	Pos      Pos
 }
 
-// NotExpr 是 !expr。
 type NotExpr struct {
 	Operand LogicalExpr
 	Pos     Pos
@@ -150,14 +134,12 @@ type ParenExpr struct {
 	Pos   Pos
 }
 
-// ComparisonExpr 是 a <op> b。
 type ComparisonExpr struct {
 	Op          CmpOp
 	Left, Right Comparable
 	Pos         Pos
 }
 
-// CmpOp 枚举所有比较运算符。
 type CmpOp uint8
 
 const (
@@ -223,23 +205,16 @@ func (*ParenExpr) logicalExpr()      {}
 func (*ComparisonExpr) logicalExpr() {}
 func (*TestExpr) logicalExpr()       {}
 
-// LiteralKind 标识字面量的种类。
 type LiteralKind uint8
 
 const (
-	// LitString identifies a string literal.
 	LitString LiteralKind = iota
-	// LitInt identifies an integer literal.
 	LitInt
-	// LitFloat identifies a floating-point literal.
 	LitFloat
-	// LitBool identifies a boolean literal.
 	LitBool
-	// LitNull identifies a null literal.
 	LitNull
 )
 
-// LiteralValue 保存字面量的解析结果及其原始文本。
 type LiteralValue struct {
 	Kind LiteralKind
 	Str  string
@@ -247,7 +222,6 @@ type LiteralValue struct {
 	Raw  string
 }
 
-// Literal 是 number / string / true / false / null 之一。
 type Literal struct {
 	Value LiteralValue
 	Pos   Pos
@@ -268,7 +242,6 @@ type SingularSegment struct {
 	Pos   Pos
 }
 
-// FunctionCall 表示函数调用。编译阶段会填充 Ret。
 type FunctionCall struct {
 	Name string
 	Args []Expr
@@ -276,7 +249,6 @@ type FunctionCall struct {
 	Pos  Pos
 }
 
-// FilterQuery 将子查询嵌入表达式。
 type FilterQuery struct {
 	Query *Query
 	Pos   Pos

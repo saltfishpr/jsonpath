@@ -122,14 +122,13 @@ type token struct {
 	Pos   ast.Pos
 }
 
-// lex 将查询串切分为 token 列表，末尾包含 tkEOF。
 func lex(src string) ([]token, error) {
-	if !utf8.ValidString(src) {
-		return nil, &Error{Pos: ast.Pos{Line: 1, Col: 1}, Msg: "query is not valid UTF-8"}
-	}
 	l := &lexer{src: src, line: 1, col: 1}
 	for {
 		tok, err := l.next()
+		if l.err != nil {
+			return l.tokens, l.err
+		}
 		if err != nil {
 			return l.tokens, err
 		}
@@ -146,15 +145,20 @@ type lexer struct {
 	line   int
 	col    int
 	tokens []token
+	err    error
 }
 
 func (l *lexer) pos() ast.Pos { return ast.Pos{Offset: l.off, Line: l.line, Col: l.col} }
 
 func (l *lexer) peek() (rune, int) {
-	if l.off >= len(l.src) {
+	if l.err != nil || l.off >= len(l.src) {
 		return 0, 0
 	}
 	r, w := utf8.DecodeRuneInString(l.src[l.off:])
+	if r == utf8.RuneError && w == 1 {
+		l.err = l.errorf(l.pos(), "query is not valid UTF-8")
+		return 0, 0
+	}
 	return r, w
 }
 
@@ -280,8 +284,7 @@ func (l *lexer) next() (token, error) {
 }
 
 func (l *lexer) lexString(start ast.Pos, quote rune) (token, error) {
-	_, w := l.peek()
-	l.advance(quote, w)
+	l.advance(quote, 1)
 
 	var sb strings.Builder
 	for {
@@ -384,7 +387,7 @@ func (l *lexer) lexHex4() (rune, error) {
 	}
 	var v rune
 	for i := 0; i < 4; i++ {
-		c := l.src[l.off]
+		c, w := l.peek()
 		var d rune
 		switch {
 		case c >= '0' && c <= '9':
@@ -397,7 +400,7 @@ func (l *lexer) lexHex4() (rune, error) {
 			return 0, l.errorf(l.pos(), "invalid hex digit %q in \\u escape", c)
 		}
 		v = v<<4 | d
-		l.advance(rune(c), 1)
+		l.advance(c, w)
 	}
 	return v, nil
 }

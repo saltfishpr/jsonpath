@@ -13,7 +13,7 @@ func (q *Query) run(doc *Document) ([]*document.Node, error) {
 
 type evaluator struct {
 	root     *document.Node
-	literals map[*ast.Literal]document.Value
+	literals map[*ast.Literal]*document.Node
 	regexes  map[string]*iregexp.Regexp
 }
 
@@ -63,10 +63,20 @@ func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out
 			return nil, err
 		}
 	}
-	for _, child := range in.Children {
-		out, err = e.descendants(selectors, child, out)
-		if err != nil {
-			return nil, err
+	switch in.Kind() {
+	case document.KindArray:
+		for _, child := range in.Array() {
+			out, err = e.descendants(selectors, child, out)
+			if err != nil {
+				return nil, err
+			}
+		}
+	case document.KindObject:
+		for _, member := range in.Members() {
+			out, err = e.descendants(selectors, member.Value, out)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
@@ -75,34 +85,52 @@ func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out
 func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*document.Node) ([]*document.Node, error) {
 	switch s := sel.(type) {
 	case *ast.NameSelector:
-		if obj, ok := in.Value.(document.Object); ok {
-			if i, exists := obj.MemberIndex(s.Name); exists {
-				out = append(out, in.Children[i])
-			}
+		if child := in.Get(s.Name); child != nil {
+			out = append(out, child)
 		}
 	case *ast.WildcardSelector:
-		out = append(out, in.Children...)
+		switch in.Kind() {
+		case document.KindArray:
+			out = append(out, in.Array()...)
+		case document.KindObject:
+			for _, member := range in.Members() {
+				out = append(out, member.Value)
+			}
+		}
 	case *ast.IndexSelector:
-		if _, ok := in.Value.(document.Array); ok {
+		if in.Kind() == document.KindArray {
 			idx := s.Index
-			length := int64(len(in.Children))
+			length := int64(in.Len())
 			if idx < 0 {
 				idx += length
 			}
 			if idx >= 0 && idx < length {
-				out = append(out, in.Children[idx])
+				out = append(out, in.Array()[idx])
 			}
 		}
 	case *ast.SliceSelector:
 		out = e.sliceSelector(s, in, out)
 	case *ast.FilterSelector:
-		for _, child := range in.Children {
-			ok, err := e.evalLogical(s.Expr, child)
-			if err != nil {
-				return nil, err
+		switch in.Kind() {
+		case document.KindArray:
+			for _, child := range in.Array() {
+				ok, err := e.evalLogical(s.Expr, child)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					out = append(out, child)
+				}
 			}
-			if ok {
-				out = append(out, child)
+		case document.KindObject:
+			for _, member := range in.Members() {
+				ok, err := e.evalLogical(s.Expr, member.Value)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					out = append(out, member.Value)
+				}
 			}
 		}
 	}
@@ -110,7 +138,7 @@ func (e *evaluator) selector(sel ast.Selector, in *document.Node, out []*documen
 }
 
 func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out []*document.Node) []*document.Node {
-	if _, ok := in.Value.(document.Array); !ok {
+	if in.Kind() != document.KindArray {
 		return out
 	}
 	step := int64(1)
@@ -121,7 +149,7 @@ func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out [
 		return out
 	}
 
-	length := int64(len(in.Children))
+	length := int64(in.Len())
 	lower, upper := int64(0), length
 	start, end := int64(0), length
 	if step < 0 {
@@ -149,7 +177,7 @@ func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out [
 
 	if step > 0 {
 		for i := start; i < end; {
-			out = append(out, in.Children[i])
+			out = append(out, in.Array()[i])
 			// 在相加前判断是否到达边界，避免大步长导致整数溢出。
 			if step >= end-i {
 				break
@@ -158,7 +186,7 @@ func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out [
 		}
 	} else {
 		for i := start; i > end; {
-			out = append(out, in.Children[i])
+			out = append(out, in.Array()[i])
 			if step <= end-i {
 				break
 			}

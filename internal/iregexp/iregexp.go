@@ -19,22 +19,35 @@ import (
 	"unicode/utf8"
 )
 
-// Regexp is a compiled I-Regexp.
 type Regexp struct {
 	src    string
 	search *regexp.Regexp // unanchored (for Search)
 	match  *regexp.Regexp // anchored with \A ... \z (for Match)
 }
 
-// ErrPatternTooLarge is returned by Compile when the translated RE2
-// pattern would exceed the implementation's safety limit. I-Regexp
-// itself places no bound on repetition counts; this limit protects
-// against adversarial inputs rather than silently returning "no match"
-// as earlier revisions did. The actual limit is intentionally large
-// (several megabytes of expanded pattern text).
+// ErrPatternTooLarge is returned when translation exceeds the safety limit.
+// I-Regexp permits unbounded repetition, so the limit bounds pattern expansion.
 var ErrPatternTooLarge = errors.New("iregexp: translated pattern exceeds safety limit")
 
+// ErrNestingTooDeep is returned by Compile when a pattern nests more than
+// 128 groups. This implementation limit bounds the recursive parser's stack.
+var ErrNestingTooDeep = errors.New("iregexp: pattern nesting exceeds safety limit")
+
+// SyntaxError reports an invalid I-Regexp pattern. Callers can use errors.As
+// to distinguish invalid patterns from implementation limits and backend errors.
+type SyntaxError struct {
+	// Offset is the zero-based byte offset within the pattern.
+	Offset int
+	Message string
+}
+
+func (e *SyntaxError) Error() string {
+	return fmt.Sprintf("iregexp: at offset %d: %s", e.Offset, e.Message)
+}
+
 // Compile parses and compiles an I-Regexp.
+// Invalid patterns return *SyntaxError; implementation limits and backend
+// failures return other errors and must not be interpreted as a failed match.
 func Compile(pattern string) (*Regexp, error) {
 	t := &translator{src: pattern}
 	translated, err := t.translate()
@@ -52,7 +65,6 @@ func Compile(pattern string) (*Regexp, error) {
 	return &Regexp{src: pattern, search: search, match: match}, nil
 }
 
-// MustCompile is like Compile but panics on error.
 func MustCompile(pattern string) *Regexp {
 	r, err := Compile(pattern)
 	if err != nil {
@@ -68,22 +80,15 @@ func (r *Regexp) Match(s string) bool { return r.match.MatchString(s) }
 // Search reports whether any substring of s matches the regexp.
 func (r *Regexp) Search(s string) bool { return r.search.MatchString(s) }
 
-// String returns the original I-Regexp source.
 func (r *Regexp) String() string { return r.src }
 
-// ---------------------------------------------------------------------------
 // Translator / validator
-// ---------------------------------------------------------------------------
 //
-// Each parsing function returns:
-//   text   — the equivalent RE2 fragment
-//   weight — the largest "finite max count" product that would be
-//            observed by Go's regexp/syntax.repeatIsValid when walked
-//            from this fragment's root. Keeping weight ≤ reWeightLimit
-//            guarantees Go accepts any sub-tree we emit; when applying
-//            a brace quantifier that would push the product above the
-//            limit we physically unroll it instead of writing a {n,m}
-//            that RE2 would reject.
+// Parsing functions write their RE2 fragments to one Builder so nested
+// groups do not repeatedly copy the same text. They return the largest
+// finite repeat-count product Go's regexp/syntax.repeatIsValid would observe
+// from the fragment's root. Keeping this weight ≤ reWeightLimit guarantees
+// Go accepts every repeat we emit; larger repeats are unrolled instead.
 
 const (
 	// Go's regexp/syntax enforces a per-expansion limit of 1000.
@@ -92,16 +97,27 @@ const (
 	// pathologically large I-Regexp inputs. ~8 MiB is plenty for any
 	// realistic use yet still bounded.
 	maxTranslatedBytes = 8 << 20
+	// Bound recursive parsing independently of the translated output size.
+	maxNestingDepth = 128
 )
 
 type translator struct {
-	src string
-	pos int
+	src   string
+	pos   int
+	depth int
+	out   strings.Builder
+}
+
+func (t *translator) write(text string) error {
+	if len(text) > maxTranslatedBytes-t.out.Len() {
+		return ErrPatternTooLarge
+	}
+	t.out.WriteString(text)
+	return nil
 }
 
 func (t *translator) errf(format string, args ...any) error {
-	return fmt.Errorf("iregexp: at offset %d: "+format,
-		append([]any{t.pos}, args...)...)
+	return &SyntaxError{Offset: t.pos, Message: fmt.Sprintf(format, args...)}
 }
 
 func (t *translator) peek() (rune, int, bool) {
@@ -131,163 +147,140 @@ func (t *translator) advance() (rune, bool) {
 }
 
 func (t *translator) translate() (string, error) {
-	text, _, err := t.regexp()
+	_, err := t.regexp()
 	if err != nil {
 		return "", err
 	}
 	if t.pos != len(t.src) {
 		return "", t.errf("unexpected %q", t.src[t.pos:])
 	}
-	return text, nil
+	return t.out.String(), nil
 }
 
 // regexp = branch *( "|" branch )
-func (t *translator) regexp() (string, int, error) {
-	text, weight, err := t.branch()
+func (t *translator) regexp() (int, error) {
+	weight, err := t.branch()
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
-	r, _, ok := t.peek()
-	if !ok || r != '|' {
-		return text, weight, nil
-	}
-	// Accumulate alternations through a Builder to avoid the O(n²)
-	// cost of repeated string concatenation when the pattern has many
-	// '|' branches.
-	var sb strings.Builder
-	sb.WriteString(text)
 	for {
 		r, _, ok := t.peek()
 		if !ok || r != '|' {
 			break
 		}
 		t.advance()
-		bt, bw, err := t.branch()
-		if err != nil {
-			return "", 0, err
+		if err := t.write("|"); err != nil {
+			return 0, err
 		}
-		sb.WriteByte('|')
-		sb.WriteString(bt)
+		bw, err := t.branch()
+		if err != nil {
+			return 0, err
+		}
 		if bw > weight {
 			weight = bw
 		}
-		if sb.Len() > maxTranslatedBytes {
-			return "", 0, ErrPatternTooLarge
-		}
 	}
-	return sb.String(), weight, nil
+	return weight, nil
 }
 
 // branch = *piece
-func (t *translator) branch() (string, int, error) {
-	var sb strings.Builder
+func (t *translator) branch() (int, error) {
 	weight := 1
 	for {
 		r, _, ok := t.peek()
 		if !ok || r == '|' || r == ')' {
-			return sb.String(), weight, nil
+			return weight, nil
 		}
-		pt, pw, err := t.piece()
+		pw, err := t.piece()
 		if err != nil {
-			return "", 0, err
+			return 0, err
 		}
-		sb.WriteString(pt)
 		if pw > weight {
 			weight = pw
-		}
-		if sb.Len() > maxTranslatedBytes {
-			return "", 0, ErrPatternTooLarge
 		}
 	}
 }
 
 // piece = atom [ quantifier ]
-func (t *translator) piece() (string, int, error) {
-	atomText, atomWeight, err := t.atom()
+func (t *translator) piece() (int, error) {
+	atomStart := t.out.Len()
+	atomWeight, err := t.atom()
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
 	r, _, ok := t.peek()
 	if !ok {
-		return atomText, atomWeight, nil
+		return atomWeight, nil
 	}
 	switch r {
-	case '?':
+	case '?', '*', '+':
 		t.advance()
-		// OpQuest: Max=1, weight contribution = 1 * atomWeight.
-		return atomText + "?", atomWeight, nil
-	case '*':
-		t.advance()
-		// OpStar: Max=-1, Min=0 → repeatIsValid uses m=0 (transparent).
-		return atomText + "*", atomWeight, nil
-	case '+':
-		t.advance()
-		// OpPlus: Max=-1, Min=1 → m=1 (transparent).
-		return atomText + "+", atomWeight, nil
+		// These quantifiers do not increase Go's finite repeat weight.
+		return atomWeight, t.write(string(r))
 	case '{':
-		return t.braceQuantifier(atomText, atomWeight)
+		return t.braceQuantifier(atomStart, atomWeight)
 	}
-	return atomText, atomWeight, nil
+	return atomWeight, nil
 }
 
 // braceQuantifier handles { QuantExact [ "," [ QuantExact ] ] "}".
 // It normalises leading zeros in the digit groups and transparently
 // unrolls the repetition if emitting {n,m} would push the weight above
 // Go RE2's internal limit.
-func (t *translator) braceQuantifier(atomText string, atomWeight int) (string, int, error) {
+func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 	t.advance() // '{'
 	nStr, err := t.readDigits()
 	if err != nil {
-		return "", 0, err
+		return 0, err
 	}
 	if nStr == "" {
-		return "", 0, t.errf("expected digits in quantifier")
+		return 0, t.errf("expected digits in quantifier")
 	}
-	n, err := parseCount(nStr)
-	if err != nil {
-		return "", 0, t.errf("quantifier count too large: %s", nStr)
-	}
+	nStr = normalizeCount(nStr)
 
 	r, _, ok := t.peek()
 	if !ok {
-		return "", 0, t.errf("unterminated quantifier")
+		return 0, t.errf("unterminated quantifier")
 	}
 
-	var (
-		m         int
-		unbounded bool
-		hasMax    bool
-	)
+	mStr := nStr
+	unbounded := false
 	if r == ',' {
 		t.advance()
-		mStr, err := t.readDigits()
+		mStr, err = t.readDigits()
 		if err != nil {
-			return "", 0, err
+			return 0, err
 		}
 		if mStr == "" {
 			unbounded = true
 		} else {
-			m, err = parseCount(mStr)
-			if err != nil {
-				return "", 0, t.errf("quantifier count too large: %s", mStr)
-			}
-			hasMax = true
+			mStr = normalizeCount(mStr)
 		}
 		r, _, ok = t.peek()
 		if !ok {
-			return "", 0, t.errf("unterminated quantifier")
+			return 0, t.errf("unterminated quantifier")
 		}
-	} else {
-		m = n
-		hasMax = true
 	}
 	if r != '}' {
-		return "", 0, t.errf("expected '}' in quantifier, got %q", r)
+		return 0, t.errf("expected '}' in quantifier, got %q", r)
 	}
 	t.advance()
 
-	if hasMax && n > m {
-		return "", 0, t.errf("quantifier range out of order: {%d,%d}", n, m)
+	// Validate the range before converting counts so an invalid pattern remains
+	// distinguishable from a valid count that exceeds the machine's integer range.
+	if !unbounded && (len(nStr) > len(mStr) || (len(nStr) == len(mStr) && nStr > mStr)) {
+		return 0, t.errf("quantifier range out of order: {%s,%s}", nStr, mStr)
+	}
+	n, err := strconv.Atoi(nStr)
+	if err != nil {
+		return 0, fmt.Errorf("iregexp: quantifier minimum exceeds implementation limit at offset %d: %w", t.pos, err)
+	}
+	var m int
+	if !unbounded {
+		m, err = strconv.Atoi(mStr)
+		if err != nil {
+			return 0, fmt.Errorf("iregexp: quantifier maximum exceeds implementation limit at offset %d: %w", t.pos, err)
+		}
 	}
 
 	// Determine the finite "max count" that Go's repeatIsValid would use
@@ -302,23 +295,16 @@ func (t *translator) braceQuantifier(atomText string, atomWeight int) (string, i
 		effective = 1 // transparent, as per Go's rule.
 	}
 
-	newWeight := effective * atomWeight
-
 	// Fast path: current limits already satisfy RE2.
-	if newWeight <= reWeightLimit && n <= reWeightLimit &&
+	if effective <= reWeightLimit/atomWeight && n <= reWeightLimit &&
 		(unbounded || m <= reWeightLimit) {
-		var sb strings.Builder
-		sb.WriteString(atomText)
-		sb.WriteByte('{')
-		sb.WriteString(strconv.Itoa(n)) // normalised, no leading zeros
+		suffix := "{" + nStr
 		if unbounded {
-			sb.WriteByte(',')
+			suffix += ","
 		} else if m != n {
-			sb.WriteByte(',')
-			sb.WriteString(strconv.Itoa(m))
+			suffix += "," + mStr
 		}
-		sb.WriteByte('}')
-		return sb.String(), newWeight, nil
+		return effective * atomWeight, t.write(suffix + "}")
 	}
 
 	// Slow path: unroll. Writing (atomText){k} as atomText·k·times
@@ -330,38 +316,51 @@ func (t *translator) braceQuantifier(atomText string, atomWeight int) (string, i
 	// user-supplied value like {9223372036854775807} cannot overflow
 	// an `int` and sneak past the size guard — which would then make
 	// strings.Builder.Grow panic with "negative count".
+	// Builder.String keeps this atom valid even if later appends grow the buffer.
+	atomText := t.out.String()[atomStart:]
 	atomLen := uint64(len(atomText))
-	estimated := mulSat(uint64(n), atomLen)
-	if unbounded {
-		estimated = addSat(estimated, addSat(atomLen, 5))
-	} else {
-		delta := mulSat(uint64(m-n), addSat(atomLen, 5))
-		estimated = addSat(estimated, delta)
+	remaining := n - 1
+	optional := m - n
+	var extra uint64
+	if n == 0 {
+		// {0,} always takes the fast path; here the first atom is optional.
+		remaining = 0
+		optional--
+		extra = 1 // '?' makes the existing atom the first optional copy.
 	}
-	if estimated > uint64(maxTranslatedBytes) {
-		return "", 0, ErrPatternTooLarge
+	extra = addSat(extra, mulSat(uint64(remaining), atomLen))
+	if unbounded {
+		extra = addSat(extra, addSat(atomLen, 5))
+	} else {
+		extra = addSat(extra, mulSat(uint64(optional), addSat(atomLen, 5)))
+	}
+	if extra > uint64(maxTranslatedBytes-t.out.Len()) {
+		return 0, ErrPatternTooLarge
 	}
 
-	var sb strings.Builder
-	sb.Grow(int(estimated))
-	for i := 0; i < n; i++ {
-		sb.WriteString(atomText)
+	// The whole expansion, including the existing prefix, has been checked.
+	t.out.Grow(int(extra))
+	if n == 0 {
+		t.out.WriteByte('?')
+	}
+	for i := 0; i < remaining; i++ {
+		t.out.WriteString(atomText)
 	}
 	if unbounded {
-		sb.WriteString("(?:")
-		sb.WriteString(atomText)
-		sb.WriteString(")*")
+		t.out.WriteString("(?:")
+		t.out.WriteString(atomText)
+		t.out.WriteString(")*")
 	} else {
-		for i := 0; i < m-n; i++ {
-			sb.WriteString("(?:")
-			sb.WriteString(atomText)
-			sb.WriteString(")?")
+		for i := 0; i < optional; i++ {
+			t.out.WriteString("(?:")
+			t.out.WriteString(atomText)
+			t.out.WriteString(")?")
 		}
 	}
 	// After unrolling we have a plain concat/star — no new finite
 	// repeats surround the atom, so the overall weight collapses back
 	// to the atom's own weight.
-	return sb.String(), atomWeight, nil
+	return atomWeight, nil
 }
 
 // mulSat returns a*b, saturated to math.MaxUint64 on overflow.
@@ -396,59 +395,62 @@ func (t *translator) readDigits() (string, error) {
 	return t.src[start:t.pos], nil
 }
 
-func parseCount(s string) (int, error) {
-	// Strip leading zeros for robust parsing. "01" → 1, "0000" → 0.
+func normalizeCount(s string) string {
+	// Canonical digits allow range comparison without expanding large integers.
 	i := 0
 	for i < len(s)-1 && s[i] == '0' {
 		i++
 	}
-	return strconv.Atoi(s[i:])
+	return s[i:]
 }
 
 // atom = NormalChar / charClass / ( "(" regexp ")" )
-func (t *translator) atom() (string, int, error) {
+func (t *translator) atom() (int, error) {
 	r, _, ok := t.peek()
 	if !ok {
-		return "", 0, t.errf("empty atom")
+		return 0, t.errf("empty atom")
 	}
 	switch r {
 	case '(':
+		if t.depth == maxNestingDepth {
+			return 0, fmt.Errorf("%w: limit %d at offset %d", ErrNestingTooDeep, maxNestingDepth, t.pos)
+		}
 		t.advance()
-		inner, w, err := t.regexp()
+		if err := t.write("(?:"); err != nil {
+			return 0, err
+		}
+		t.depth++
+		w, err := t.regexp()
+		t.depth--
 		if err != nil {
-			return "", 0, err
+			return 0, err
 		}
 		r2, _, ok := t.peek()
 		if !ok || r2 != ')' {
-			return "", 0, t.errf("expected ')'")
+			return 0, t.errf("expected ')'")
 		}
 		t.advance()
-		return "(?:" + inner + ")", w, nil
+		return w, t.write(")")
 	case '.':
 		t.advance()
 		// RFC 9485 §4: '.' matches any character except CR / LF.
-		return `[^\n\r]`, 1, nil
+		return 1, t.write(`[^\n\r]`)
 	case '\\':
 		s, err := t.escape()
 		if err != nil {
-			return "", 0, err
+			return 0, err
 		}
-		return s, 1, nil
+		return 1, t.write(s)
 	case '[':
-		s, err := t.charClassExpr()
-		if err != nil {
-			return "", 0, err
-		}
-		return s, 1, nil
+		return 1, t.charClassExpr()
 	case ')', ']', '|', '?', '*', '+', '{', '}':
-		return "", 0, t.errf("unexpected %q", r)
+		return 0, t.errf("unexpected %q", r)
 	default:
 		t.advance()
-		return literalString(r), 1, nil
+		return 1, t.write(literalString(r))
 	}
 }
 
-// literalString escapes a rune for safe embedding in RE2.
 func literalString(r rune) string {
 	switch r {
 	case '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}',
@@ -458,7 +460,6 @@ func literalString(r rune) string {
 	return string(r)
 }
 
-// escape handles atom-level escapes.
 func (t *translator) escape() (string, error) {
 	t.advance() // '\'
 	r, _, ok := t.peek()
@@ -477,7 +478,6 @@ func (t *translator) escape() (string, error) {
 	}
 }
 
-// categoryEsc parses \p{IsCategory} / \P{IsCategory}.
 func (t *translator) categoryEsc(kind rune) (string, error) {
 	t.advance() // 'p' or 'P'
 	r, _, ok := t.peek()
@@ -505,50 +505,58 @@ func (t *translator) categoryEsc(kind rune) (string, error) {
 }
 
 // charClassExpr = "[" [ "^" ] ( "-" / CCE1 ) *CCE1 [ "-" ] "]"
-func (t *translator) charClassExpr() (string, error) {
+func (t *translator) charClassExpr() error {
 	t.advance() // '['
-	var sb strings.Builder
-	sb.WriteByte('[')
+	if err := t.write("["); err != nil {
+		return err
+	}
 
 	if r, _, ok := t.peek(); ok && r == '^' {
 		t.advance()
-		sb.WriteByte('^')
+		if err := t.write("^"); err != nil {
+			return err
+		}
 	}
 
 	first := true
 	for {
 		r, _, ok := t.peek()
 		if !ok {
-			return "", t.errf("unterminated character class")
+			return t.errf("unterminated character class")
 		}
 		if r == ']' {
 			if first {
-				return "", t.errf("empty character class")
+				return t.errf("empty character class")
 			}
 			t.advance()
-			sb.WriteByte(']')
-			return sb.String(), nil
+			return t.write("]")
 		}
 		if r == '-' {
 			if first {
 				t.advance()
-				sb.WriteString(`\-`)
+				if err := t.write(`\-`); err != nil {
+					return err
+				}
 				first = false
 				continue
 			}
 			if next, ok := t.peekAt(1); ok && next == ']' {
 				t.advance()
-				sb.WriteString(`\-`)
+				if err := t.write(`\-`); err != nil {
+					return err
+				}
 				continue
 			}
-			return "", t.errf("unexpected '-' in character class")
+			return t.errf("unexpected '-' in character class")
 		}
 		first = false
 		cce, err := t.cce1()
 		if err != nil {
-			return "", err
+			return err
 		}
-		sb.WriteString(cce)
+		if err := t.write(cce); err != nil {
+			return err
+		}
 	}
 }
 
@@ -581,47 +589,53 @@ func (t *translator) cce1() (string, error) {
 			}
 			return s, nil
 		}
-		s, err := t.classSingleCharEsc()
+		r, err := t.classSingleCharEsc()
 		if err != nil {
 			return "", err
 		}
-		tail, err := t.maybeRangeTail()
+		tail, err := t.maybeRangeTail(r)
 		if err != nil {
 			return "", err
 		}
-		return s + tail, nil
+		return classLiteral(r) + tail, nil
 	}
 
 	if r == ']' || r == '-' || r == '[' {
 		return "", t.errf("unexpected %q in character class (must be escaped)", r)
 	}
 	t.advance()
-	tail, err := t.maybeRangeTail()
+	tail, err := t.maybeRangeTail(r)
 	if err != nil {
 		return "", err
 	}
 	return classLiteral(r) + tail, nil
 }
 
-// classSingleCharEsc consumes a SingleCharEsc at the current position.
-func (t *translator) classSingleCharEsc() (string, error) {
+func (t *translator) classSingleCharEsc() (rune, error) {
 	t.advance() // '\'
 	r, _, ok := t.peek()
 	if !ok {
-		return "", t.errf("dangling backslash")
+		return 0, t.errf("dangling backslash")
 	}
 	switch r {
 	case 'n', 'r', 't', '\\', '|', '.', '-', '^', '?', '*', '+',
 		'(', ')', '{', '}', '[', ']':
 		t.advance()
-		return "\\" + string(r), nil
+		switch r {
+		case 'n':
+			r = '\n'
+		case 'r':
+			r = '\r'
+		case 't':
+			r = '\t'
+		}
+		return r, nil
 	default:
-		return "", t.errf("invalid escape \\%c in character class", r)
+		return 0, t.errf("invalid escape \\%c in character class", r)
 	}
 }
 
-// maybeRangeTail consumes an optional "-X" range tail.
-func (t *translator) maybeRangeTail() (string, error) {
+func (t *translator) maybeRangeTail(lower rune) (string, error) {
 	r, _, ok := t.peek()
 	if !ok || r != '-' {
 		return "", nil
@@ -642,22 +656,33 @@ func (t *translator) maybeRangeTail() (string, error) {
 		if next == 'p' || next == 'P' {
 			return "", t.errf(`\p/\P cannot be a range endpoint`)
 		}
-		s, err := t.classSingleCharEsc()
+		var err error
+		r2, err = t.classSingleCharEsc()
 		if err != nil {
 			return "", err
 		}
-		return "-" + s, nil
+	} else {
+		if r2 == ']' || r2 == '-' || r2 == '[' {
+			return "", t.errf("invalid range endpoint %q", r2)
+		}
+		t.advance()
 	}
-	if r2 == ']' || r2 == '-' || r2 == '[' {
-		return "", t.errf("invalid range endpoint %q", r2)
+	// Range validity belongs to I-Regexp validation, not backend error handling.
+	if lower > r2 {
+		return "", t.errf("character range out of order: %q-%q", lower, r2)
 	}
-	t.advance()
 	return "-" + classLiteral(r2), nil
 }
 
 func classLiteral(r rune) string {
 	switch r {
-	case '\\', ']', '^', '-':
+	case '\n':
+		return `\n`
+	case '\r':
+		return `\r`
+	case '\t':
+		return `\t`
+	case '\\', '[', ']', '^', '-':
 		return "\\" + string(r)
 	}
 	return string(r)

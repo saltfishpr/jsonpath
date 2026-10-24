@@ -3,7 +3,6 @@ package jsonpath
 import (
 	"errors"
 	"strconv"
-	"unicode/utf8"
 
 	"github.com/saltfishpr/jsonpath/internal/ast"
 	"github.com/saltfishpr/jsonpath/internal/document"
@@ -12,10 +11,10 @@ import (
 
 // 字段的有效性由函数签名决定，无需在每个值中重复保存类型。
 type functionValue struct {
-	value   document.Value
+	value   *document.Node
 	nothing bool // 区别于 JSON null。
 	logical bool
-	nodes   []document.Value
+	nodes   []*document.Node
 }
 
 type functionDefinition struct {
@@ -34,13 +33,8 @@ var builtinFunctions = map[string]functionDefinition{
 
 func lengthFn(_ *evaluator, args []functionValue) (functionValue, error) {
 	if !args[0].nothing {
-		switch v := args[0].value.(type) {
-		case document.String:
-			return numberResult(utf8.RuneCountInString(v.V)), nil
-		case document.Array:
-			return numberResult(v.Len()), nil
-		case document.Object:
-			return numberResult(v.MemberCount()), nil
+		if length := args[0].value.Len(); length >= 0 {
+			return numberResult(length), nil
 		}
 	}
 	return functionValue{nothing: true}, nil
@@ -66,18 +60,19 @@ func searchFn(e *evaluator, args []functionValue) (functionValue, error) {
 }
 
 func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValue, error) {
-	text, textOK := args[0].value.(document.String)
-	pattern, patternOK := args[1].value.(document.String)
-	if args[0].nothing || args[1].nothing || !textOK || !patternOK {
+	text, pattern := args[0].value, args[1].value
+	if args[0].nothing || args[1].nothing || text == nil || pattern == nil ||
+		text.Kind() != document.KindString || pattern.Kind() != document.KindString {
 		return functionValue{}, nil
 	}
-	r, cached := e.regexes[pattern.V]
+	r, cached := e.regexes[pattern.String()]
 	if !cached {
 		// Query 的缓存只读，动态模式不写入共享状态。
 		var err error
-		r, err = iregexp.Compile(pattern.V)
+		r, err = iregexp.Compile(pattern.String())
 		if err != nil {
-			if errors.Is(err, iregexp.ErrPatternTooLarge) {
+			var syntaxErr *iregexp.SyntaxError
+			if !errors.As(err, &syntaxErr) {
 				return functionValue{}, err
 			}
 		}
@@ -86,13 +81,13 @@ func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValu
 		return logicalResult(false), nil
 	}
 	if search {
-		return functionValue{logical: r.Search(text.V)}, nil
+		return functionValue{logical: r.Search(text.String())}, nil
 	}
-	return functionValue{logical: r.Match(text.V)}, nil
+	return functionValue{logical: r.Match(text.String())}, nil
 }
 
 func numberResult(n int) functionValue {
-	return functionValue{value: document.ParseNumber([]byte(strconv.Itoa(n)))}
+	return functionValue{value: document.NewNumber(strconv.Itoa(n))}
 }
 
 func logicalResult(b bool) functionValue {

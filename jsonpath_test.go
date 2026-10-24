@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/saltfishpr/jsonpath"
-	"github.com/saltfishpr/jsonpath/internal/document"
 )
 
 const (
@@ -276,7 +275,7 @@ func TestQueryValues_StringEscapes(t *testing.T) {
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
 				got, err := jsonpath.QueryValues(`$`, []byte(tt.data))
-				var documentErr *document.Error
+				var documentErr *jsonpath.DocumentError
 				if !errors.As(err, &documentErr) {
 					t.Fatalf("QueryValues error = %v, want *jsonpath.DocumentError", err)
 				}
@@ -394,7 +393,7 @@ func TestQueryValues_InvalidDocument(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := jsonpath.QueryValues(`$`, []byte(tt.data))
-			var documentErr *document.Error
+			var documentErr *jsonpath.DocumentError
 			if !errors.As(err, &documentErr) {
 				t.Fatalf("QueryValues error = %v, want *jsonpath.DocumentError", err)
 			}
@@ -405,14 +404,14 @@ func TestQueryValues_InvalidDocument(t *testing.T) {
 	}
 	t.Run("nil_input", func(t *testing.T) {
 		got, err := jsonpath.QueryValues(`$`, nil)
-		var documentErr *document.Error
+		var documentErr *jsonpath.DocumentError
 		if !errors.As(err, &documentErr) || got != nil {
 			t.Fatalf("QueryValues(nil) = (%s, %v), want (nil, *jsonpath.DocumentError)", got, err)
 		}
 	})
 	t.Run("invalid_unselected_subtree", func(t *testing.T) {
 		got, err := jsonpath.QueryValues(`$.a`, []byte(`{"a":1,"b":[}`))
-		var documentErr *document.Error
+		var documentErr *jsonpath.DocumentError
 		if !errors.As(err, &documentErr) || got != nil {
 			t.Fatalf("QueryValues = (%s, %v), want (nil, *jsonpath.DocumentError)", got, err)
 		}

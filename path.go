@@ -10,7 +10,7 @@ import (
 func normalizedPath(n *document.Node) string {
 	var ancestors [16]*document.Node
 	chain := ancestors[:0]
-	for node := n; node != nil && node.Parent != nil; node = node.Parent {
+	for node := n; node != nil && node.Parent() != nil; node = node.Parent() {
 		if len(chain) == cap(chain) {
 			next := make([]*document.Node, len(chain), cap(chain)*2)
 			copy(next, chain)
@@ -22,13 +22,13 @@ func normalizedPath(n *document.Node) string {
 	var sb strings.Builder
 	sb.WriteByte('$')
 	for i := len(chain) - 1; i >= 0; i-- {
-		step := chain[i].Step
+		node := chain[i]
 		sb.WriteByte('[')
-		if step.IsIndex() {
-			sb.WriteString(strconv.FormatInt(step.Index(), 10))
+		if node.Index() >= 0 {
+			sb.WriteString(strconv.FormatInt(node.Index(), 10))
 		} else {
 			sb.WriteByte('\'')
-			name := step.Name()
+			name := node.Name()
 			// RFC 9535 第 2.7 节只要求转义这些 ASCII 字节，其余字符原样保留。
 			for j := 0; j < len(name); j++ {
 				c := name[j]

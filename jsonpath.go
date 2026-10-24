@@ -13,12 +13,13 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/parse"
 )
 
-// Query 是可重复执行的编译查询。同一 Query 可由多个 goroutine 并发使用，
+// Query 是可重复执行的编译查询。零值不可用，必须由 Compile 创建。
+// 同一 Query 可由多个 goroutine 并发使用，
 // 前提是调用方不修改对应的 Document。
 type Query struct {
 	src      string
 	query    *ast.Query
-	literals map[*ast.Literal]document.Value
+	literals map[*ast.Literal]*document.Node
 	regexes  map[string]*iregexp.Regexp
 }
 
@@ -40,9 +41,8 @@ func Compile(src string) (*Query, error) {
 	return &Query{src: src, query: q, literals: c.literals, regexes: c.regexes}, nil
 }
 
-// Values 返回匹配节点的原始 JSON 片段，按查询选择顺序保留重复选择。
-// 片段与文档的原始输入共享内存；没有匹配时返回空切片。
-// 函数求值失败时返回错误，不返回部分结果。
+// Values 返回按选择顺序排列的原始 JSON 片段，保留重复项并与文档共享内存。
+// 无匹配时返回空切片；求值失败时不返回部分结果。q 和 doc 必须是 Compile 和 Parse 返回的非 nil 值。
 func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
 	nodes, err := q.run(doc)
 	if err != nil {
@@ -50,14 +50,14 @@ func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
 	}
 	out := make([]json.RawMessage, len(nodes))
 	for i, n := range nodes {
-		out[i] = json.RawMessage(n.Value.Raw())
+		out[i] = json.RawMessage(n.Raw())
 	}
 	return out, nil
 }
 
-// Nodes 返回匹配节点及其 Normalized Path，按查询选择顺序保留重复选择。
-// 节点的 Value 与 doc 共享内存；没有匹配时返回空切片。
-// 函数求值失败时返回错误，不返回部分结果。
+// Nodes 返回按选择顺序排列的匹配节点及其 Normalized Path，并保留重复项。
+// Value 与文档共享内存；无匹配时返回空切片，求值失败时不返回部分结果。
+// q 和 doc 必须是 Compile 和 Parse 返回的非 nil 值。
 func (q *Query) Nodes(doc *Document) ([]Node, error) {
 	nodes, err := q.run(doc)
 	if err != nil {
@@ -65,29 +65,35 @@ func (q *Query) Nodes(doc *Document) ([]Node, error) {
 	}
 	out := make([]Node, len(nodes))
 	for i, n := range nodes {
-		out[i] = Node{Value: json.RawMessage(n.Value.Raw()), Path: normalizedPath(n)}
+		out[i] = Node{Value: json.RawMessage(n.Raw()), Path: normalizedPath(n)}
 	}
 	return out, nil
 }
 
-// Document 保存解析后的节点树和原始输入，应通过 Parse 创建。调用方应将其视为不可变。
+// Document 保存解析后的节点树和原始输入。零值不可用，必须由 Parse 创建。
+// 调用方应将其视为不可变。
 type Document struct {
 	root *document.Node
 	src  []byte
 }
 
-// Parse 将 JSON 字节解析为 Document，允许 JSON 空白字符包围输入，但不接受 BOM。
+// Parse 将 UTF-8 编码的 JSON 字节解析为 Document，允许 JSON 空白字符包围输入，
+// 但不接受 BOM、非法 UTF-8 或重复的对象成员名。解析错误返回 *DocumentError。
 // Document 与 data 共享底层字节，调用方不应修改 data。
 func Parse(data []byte) (*Document, error) {
 	root, err := document.Parse(data)
 	if err != nil {
+		var documentErr *document.SyntaxError
+		if errors.As(err, &documentErr) {
+			return nil, &DocumentError{Offset: documentErr.Offset, Message: documentErr.Message}
+		}
 		return nil, err
 	}
 	return &Document{root: root, src: data}, nil
 }
 
-// QueryValues 编译 expr、解析 data，并返回匹配节点的原始 JSON 片段。
-// 结果按查询选择顺序保留重复选择，与 data 共享底层字节；无匹配时返回空切片。
+// QueryValues 返回 expr 在 data 中匹配的原始 JSON 片段，按选择顺序保留重复项。
+// 结果与 data 共享内存；无匹配时返回空切片。
 func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
 	query, err := Compile(expr)
 	if err != nil {
@@ -100,14 +106,14 @@ func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
 	return query.Values(doc)
 }
 
-// Node 包含匹配节点的原始 JSON 片段及其 Normalized Path。Value 与输入共享底层字节。
+// Node 包含匹配节点的原始 JSON 片段及其 Normalized Path；Value 与输入共享内存。
 type Node struct {
 	Value json.RawMessage
 	Path  string
 }
 
-// QueryNodes 编译 expr、解析 data，并返回匹配节点及其 Normalized Path。
-// 节点的 Value 与 data 共享底层字节；无匹配时返回空切片。
+// QueryNodes 返回 expr 在 data 中匹配的节点及其 Normalized Path，按选择顺序保留重复项。
+// Value 与 data 共享内存；无匹配时返回空切片。
 func QueryNodes(expr string, data []byte) ([]Node, error) {
 	query, err := Compile(expr)
 	if err != nil {

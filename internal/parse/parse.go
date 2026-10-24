@@ -15,7 +15,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	return fmt.Sprintf("jsonpath: parse error at line %d col %d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
+	return fmt.Sprintf("parse error at line %d col %d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
 }
 
 // Parse 将 JSONPath 查询解析为 AST。
@@ -489,7 +489,7 @@ func toComparable(e ast.Expr) (ast.Comparable, error) {
 	case *ast.FunctionCall:
 		return v, nil
 	case *ast.FilterQuery:
-		if segs, ok := toSingular(v.Query.Segments); ok {
+		if segs, ok := toSingularSegments(v.Query.Segments); ok {
 			return &ast.SingularQuery{IsRoot: v.Query.IsRoot, Segments: segs, Pos: v.Pos}, nil
 		}
 		return nil, &Error{Pos: v.Pos, Msg: "comparison operand must be a singular query"}
@@ -497,7 +497,7 @@ func toComparable(e ast.Expr) (ast.Comparable, error) {
 	return nil, &Error{Pos: e.Position(), Msg: "comparison operand must be literal, singular-query or function"}
 }
 
-func toSingular(segs []ast.Segment) ([]ast.SingularSegment, bool) {
+func toSingularSegments(segs []ast.Segment) ([]ast.SingularSegment, bool) {
 	out := make([]ast.SingularSegment, 0, len(segs))
 	for _, seg := range segs {
 		if seg.Kind != ast.SegChild || len(seg.Selectors) != 1 {

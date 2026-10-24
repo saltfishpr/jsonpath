@@ -10,7 +10,7 @@ import (
 )
 
 type compiler struct {
-	literals map[*ast.Literal]document.Value
+	literals map[*ast.Literal]*document.Node
 	regexes  map[string]*iregexp.Regexp
 }
 
@@ -79,7 +79,7 @@ func (c *compiler) walkExpr(e ast.Expr) error {
 	case *ast.SingularQuery:
 	case *ast.Literal:
 		if c.literals == nil {
-			c.literals = make(map[*ast.Literal]document.Value)
+			c.literals = make(map[*ast.Literal]*document.Node)
 		}
 		c.literals[v] = literalValue(v)
 	case *ast.FunctionCall:
@@ -116,7 +116,8 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 			if _, cached := c.regexes[pattern.Value.Str]; !cached {
 				r, err := iregexp.Compile(pattern.Value.Str)
 				if err != nil {
-					if errors.Is(err, iregexp.ErrPatternTooLarge) {
+					var syntaxErr *iregexp.SyntaxError
+					if !errors.As(err, &syntaxErr) {
 						return err
 					}
 					// RFC 9535 §2.4.6、§2.4.7 规定：模式不符合 I-Regexp 时，match/search
