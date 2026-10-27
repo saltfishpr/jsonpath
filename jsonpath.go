@@ -1,299 +1,127 @@
-// Package jsonpath implements JSONPath query syntax parser and evaluator with gjson-style API.
-//
-// The implementation follows RFC 9535: https://www.rfc-editor.org/rfc/rfc9535.html
+// Package jsonpath 编译并执行 RFC 9535 JSONPath 查询。一次性查询可用
+// QueryValues 和 QueryNodes；重复查询可复用 Compile 返回的 Query。
+// 解析结果和查询结果可能与输入字节共享内存，调用方不应修改输入或节点。
 package jsonpath
 
 import (
-	"strconv"
-	"strings"
+	"encoding/json"
+	"errors"
+
+	"github.com/saltfishpr/jsonpath/internal/ast"
+	"github.com/saltfishpr/jsonpath/internal/document"
+	"github.com/saltfishpr/jsonpath/internal/iregexp"
+	"github.com/saltfishpr/jsonpath/internal/parse"
 )
 
-// JSONType represents the type of a JSON value
-type JSONType int
-
-const (
-	// JSONTypeNull is a null json value
-	JSONTypeNull JSONType = iota
-	// JSONTypeFalse is a json false boolean
-	JSONTypeFalse
-	// JSONTypeNumber is json number
-	JSONTypeNumber
-	// JSONTypeString is json string
-	JSONTypeString
-	// JSONTypeTrue is a json true boolean
-	JSONTypeTrue
-	// JSONTypeJSON is a raw block of JSON
-	JSONTypeJSON
-)
-
-// String returns a string representation of the type
-func (t JSONType) String() string {
-	return []string{"Null", "False", "Number", "String", "True", "JSON"}[t]
+// Query 是可重复执行的编译查询。零值不可用，必须由 Compile 创建。
+// 同一 Query 可由多个 goroutine 并发使用，
+// 前提是调用方不修改对应的 Document。
+type Query struct {
+	src      string
+	query    *ast.Query
+	literals map[*ast.Literal]*document.Node
+	regexes  map[string]*iregexp.Regexp
 }
 
-// Result represents a JSON value returned from Get()
-type Result struct {
-	// Type is the json type
-	Type JSONType
-	// Raw is the raw json
-	Raw string
-	// Str is the json string
-	Str string
-	// Num is the json number
-	Num float64
-	// Index of raw value in original json, zero means index unknown
-	Index int
-}
-
-// Get executes a JSONPath query and returns the first result
-func Get(json, path string) Result {
-	query, err := Parse(path)
+// Compile 使用内置函数编译查询串。
+// 查询的词法、语法和语义错误返回 *CompileError。
+func Compile(src string) (*Query, error) {
+	q, err := parse.Parse(src)
 	if err != nil {
-		return Result{}
+		var parseErr *parse.Error
+		if errors.As(err, &parseErr) {
+			return nil, &CompileError{Offset: parseErr.Pos.Offset, Message: parseErr.Msg}
+		}
+		return nil, err
 	}
-	eval := NewEvaluator(json, query)
-	results := eval.Evaluate()
-	if len(results) == 0 {
-		return Result{}
+	c := &compiler{}
+	if err := c.walkQuery(q); err != nil {
+		return nil, err
 	}
-	return results[0]
+	return &Query{src: src, query: q, literals: c.literals, regexes: c.regexes}, nil
 }
 
-// GetBytes executes a JSONPath query with []byte input
-func GetBytes(json []byte, path string) Result {
-	return Get(string(json), path)
-}
-
-// Get continues a query from the current result
-func (r Result) Get(path string) Result {
-	if !r.Exists() {
-		return Result{}
-	}
-	return Get(r.Raw, path)
-}
-
-// GetMany executes a JSONPath query and returns all results
-func GetMany(json, path string) []Result {
-	query, err := Parse(path)
+// Values 返回按选择顺序排列的原始 JSON 片段，保留重复项并与文档共享内存。
+// 无匹配时返回空切片；求值失败时不返回部分结果。q 和 doc 必须是 Compile 和 Parse 返回的非 nil 值。
+func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
+	nodes, err := q.run(doc)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	eval := NewEvaluator(json, query)
-	return eval.Evaluate()
-}
-
-// GetManyBytes executes a JSONPath query with []byte input
-func GetManyBytes(json []byte, path string) []Result {
-	return GetMany(string(json), path)
-}
-
-// GetMany continues a query from the current result
-func (r Result) GetMany(path string) []Result {
-	if !r.Exists() {
-		return nil
+	out := make([]json.RawMessage, len(nodes))
+	for i, n := range nodes {
+		out[i] = json.RawMessage(n.Raw())
 	}
-	return GetMany(r.Raw, path)
+	return out, nil
 }
 
-// Exists checks if the result exists
-func (r Result) Exists() bool {
-	return r.Type != JSONTypeNull || len(r.Raw) != 0
+// Nodes 返回按选择顺序排列的匹配节点及其 Normalized Path，并保留重复项。
+// Value 与文档共享内存；无匹配时返回空切片，求值失败时不返回部分结果。
+// q 和 doc 必须是 Compile 和 Parse 返回的非 nil 值。
+func (q *Query) Nodes(doc *Document) ([]Node, error) {
+	nodes, err := q.run(doc)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Node, len(nodes))
+	for i, n := range nodes {
+		out[i] = Node{Value: json.RawMessage(n.Raw()), Path: normalizedPath(n)}
+	}
+	return out, nil
 }
 
-// IsObject checks if the result is a JSON object
-func (r Result) IsObject() bool {
-	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '{'
+// Document 保存解析后的节点树和原始输入。零值不可用，必须由 Parse 创建。
+// 调用方应将其视为不可变。
+type Document struct {
+	root *document.Node
+	src  []byte
 }
 
-// IsArray checks if the result is a JSON array
-func (r Result) IsArray() bool {
-	return r.Type == JSONTypeJSON && len(r.Raw) > 0 && r.Raw[0] == '['
-}
-
-// IsString checks if the result is a string
-func (r Result) IsString() bool {
-	return r.Type == JSONTypeString
-}
-
-// IsBool checks if the result is a boolean
-func (r Result) IsBool() bool {
-	return r.Type == JSONTypeTrue || r.Type == JSONTypeFalse
-}
-
-// String returns the string representation
-func (r Result) String() string {
-	switch r.Type {
-	case JSONTypeNull:
-		return ""
-	case JSONTypeFalse:
-		return "false"
-	case JSONTypeTrue:
-		return "true"
-	case JSONTypeString:
-		return r.Str
-	case JSONTypeNumber:
-		if r.Raw == "" {
-			return strconv.FormatFloat(r.Num, 'f', -1, 64)
+// Parse 将 UTF-8 编码的 JSON 字节解析为 Document，允许 JSON 空白字符包围输入，
+// 但不接受 BOM、非法 UTF-8 或重复的对象成员名。解析错误返回 *DocumentError。
+// Document 与 data 共享底层字节，调用方不应修改 data。
+func Parse(data []byte) (*Document, error) {
+	root, err := document.Parse(data)
+	if err != nil {
+		var documentErr *document.SyntaxError
+		if errors.As(err, &documentErr) {
+			return nil, &DocumentError{Offset: documentErr.Offset, Message: documentErr.Message}
 		}
-		return r.Raw
-	case JSONTypeJSON:
-		return r.Raw
-	default:
-		return ""
+		return nil, err
 	}
+	return &Document{root: root, src: data}, nil
 }
 
-// Int returns the int64 representation
-func (r Result) Int() int64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return int64(r.Num)
-	case JSONTypeString:
-		n, _ := strconv.ParseInt(r.Str, 10, 64)
-		return n
+// QueryValues 返回 expr 在 data 中匹配的原始 JSON 片段，按选择顺序保留重复项。
+// 结果与 data 共享内存；无匹配时返回空切片。
+func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
+	query, err := Compile(expr)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	doc, err := Parse(data)
+	if err != nil {
+		return nil, err
+	}
+	return query.Values(doc)
 }
 
-// Uint returns the uint64 representation
-func (r Result) Uint() uint64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return uint64(r.Num)
-	case JSONTypeString:
-		n, _ := strconv.ParseUint(r.Str, 10, 64)
-		return n
-	}
-	return 0
+// Node 包含匹配节点的原始 JSON 片段及其 Normalized Path；Value 与输入共享内存。
+type Node struct {
+	Value json.RawMessage
+	Path  string
 }
 
-// Float returns the float64 representation
-func (r Result) Float() float64 {
-	switch r.Type {
-	case JSONTypeTrue:
-		return 1
-	case JSONTypeNumber:
-		return r.Num
-	case JSONTypeString:
-		f, _ := strconv.ParseFloat(r.Str, 64)
-		return f
+// QueryNodes 返回 expr 在 data 中匹配的节点及其 Normalized Path，按选择顺序保留重复项。
+// Value 与 data 共享内存；无匹配时返回空切片。
+func QueryNodes(expr string, data []byte) ([]Node, error) {
+	query, err := Compile(expr)
+	if err != nil {
+		return nil, err
 	}
-	return 0
-}
-
-// Bool returns the bool representation
-func (r Result) Bool() bool {
-	switch r.Type {
-	case JSONTypeTrue:
-		return true
-	case JSONTypeFalse:
-		return false
-	case JSONTypeString:
-		b, _ := strconv.ParseBool(strings.ToLower(r.Str))
-		return b
-	case JSONTypeNumber:
-		return r.Num != 0
+	doc, err := Parse(data)
+	if err != nil {
+		return nil, err
 	}
-	return false
-}
-
-// Array returns the []Result representation
-func (r Result) Array() []Result {
-	if r.Type == JSONTypeNull {
-		return []Result{}
-	}
-	if !r.IsArray() {
-		return []Result{r}
-	}
-
-	var results []Result
-	i := 1
-	for i < len(r.Raw) {
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) || r.Raw[i] == ']' {
-			break
-		}
-		elem, next := parseArrayElement(r.Raw, i)
-		results = append(results, elem)
-		i = next
-
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i < len(r.Raw) && r.Raw[i] == ',' {
-			i++
-		}
-	}
-	return results
-}
-
-// Map returns the map[string]Result representation
-func (r Result) Map() map[string]Result {
-	results := make(map[string]Result)
-	for _, kv := range r.MapKVList() {
-		results[kv.Key] = kv.Value
-	}
-	return results
-}
-
-type KV struct {
-	Key   string
-	Value Result
-}
-
-func (r Result) MapKVList() []KV {
-	if r.Type == JSONTypeNull {
-		return []KV{}
-	}
-	if !r.IsObject() {
-		return []KV{}
-	}
-
-	var results []KV
-	i := 1
-	for i < len(r.Raw) {
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i >= len(r.Raw) || r.Raw[i] == '}' {
-			break
-		}
-		key, value, next := parseObjectMember(r.Raw, i)
-		// Stop parsing on invalid JSON to prevent infinite loop
-		if key == "" {
-			break
-		}
-		results = append(results, KV{Key: key, Value: value})
-		i = next
-
-		i = skipWhitespaceJSON(r.Raw, i)
-		if i < len(r.Raw) && r.Raw[i] == ',' {
-			i++
-		}
-	}
-	return results
-}
-
-// Value returns the Go native value representation
-func (r Result) Value() interface{} {
-	switch r.Type {
-	case JSONTypeNull:
-		return nil
-	case JSONTypeTrue:
-		return true
-	case JSONTypeFalse:
-		return false
-	case JSONTypeNumber:
-		return r.Num
-	case JSONTypeString:
-		return r.Str
-	case JSONTypeJSON:
-		if r.IsArray() {
-			return r.Array()
-		}
-		if r.IsObject() {
-			return r.Map()
-		}
-	}
-	return nil
+	return query.Nodes(doc)
 }

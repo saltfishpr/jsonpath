@@ -1,126 +1,86 @@
 package jsonpath
 
 import (
-	"fmt"
+	"errors"
+	"strconv"
+
+	"github.com/saltfishpr/jsonpath/internal/ast"
+	"github.com/saltfishpr/jsonpath/internal/document"
+	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-// FunctionValueType 表示函数参数/返回值的类型
-type FunctionValueType int
-
-const (
-	FunctionValueTypeValue   FunctionValueType = iota // Result / Noting
-	FunctionValueTypeLogical                          // true/false
-	FunctionValueTypeNodes                            // []Result
-)
-
-// String 返回类型的字符串表示
-func (t FunctionValueType) String() string {
-	switch t {
-	case FunctionValueTypeValue:
-		return "ValueType"
-	case FunctionValueTypeLogical:
-		return "LogicalType"
-	case FunctionValueTypeNodes:
-		return "NodesType"
-	default:
-		return "Unknown"
-	}
+// 字段的有效性由函数签名决定，无需在每个值中重复保存类型。
+type functionValue struct {
+	value   *document.Node
+	nothing bool // 区别于 JSON null。
+	logical bool
+	nodes   []*document.Node
 }
 
-var FunctionValueNothing = Result{}
-
-// FunctionSignature 定义函数签名
-type FunctionSignature struct {
-	Name       string
-	ParamTypes []FunctionValueType
-	ReturnType FunctionValueType
-	Handler    func(args []interface{}) (interface{}, error)
+type functionDefinition struct {
+	params []ast.ExprType
+	result ast.ExprType
 }
 
-// 函数注册表
-var functionRegistry = map[string]FunctionSignature{}
-
-// init 注册所有标准函数
-func init() {
-	registerLength()
-	registerCount()
-	registerMatch()
-	registerSearch()
-	registerValue()
+var builtinFunctions = map[string]functionDefinition{
+	"length": {[]ast.ExprType{ast.TypeValue}, ast.TypeValue},
+	"count":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
+	"value":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
+	"match":  {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
+	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
 }
 
-func (e *Evaluator) evalFuncCall(currentNode Result, fn *FuncCall, expectedType FunctionValueType) (interface{}, error) {
-	sig, exists := functionRegistry[fn.Name]
-	if !exists {
-		return nil, fmt.Errorf("unknown function: %s", fn.Name)
+func lengthFn(args []functionValue) (functionValue, error) {
+	if !args[0].nothing {
+		if length := args[0].value.Len(); length >= 0 {
+			return numberResult(length), nil
+		}
 	}
+	return functionValue{nothing: true}, nil
+}
 
-	if len(fn.Args) != len(sig.ParamTypes) {
-		return nil, fmt.Errorf("%s() expects %d arguments, got %d",
-			fn.Name, len(sig.ParamTypes), len(fn.Args))
+func countFn(args []functionValue) (functionValue, error) {
+	return numberResult(len(args[0].nodes)), nil
+}
+
+func valueFn(args []functionValue) (functionValue, error) {
+	if len(args[0].nodes) == 1 {
+		return functionValue{value: args[0].nodes[0]}, nil
 	}
+	return functionValue{nothing: true}, nil
+}
 
-	args := make([]interface{}, len(fn.Args))
-	for i, arg := range fn.Args {
-		val, err := e.evalFuncArg(currentNode, arg, sig.ParamTypes[i])
+func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValue, error) {
+	text, pattern := args[0].value, args[1].value
+	if args[0].nothing || args[1].nothing || text == nil || pattern == nil ||
+		text.Kind() != document.KindString || pattern.Kind() != document.KindString {
+		return functionValue{}, nil
+	}
+	r, cached := e.regexes[pattern.String()]
+	if !cached {
+		// Query 的缓存只读，动态模式不写入共享状态。
+		var err error
+		r, err = iregexp.Compile(pattern.String())
 		if err != nil {
-			return nil, fmt.Errorf("argument %d of %s(): %w", i+1, fn.Name, err)
-		}
-		args[i] = val
-	}
-
-	return sig.Handler(args)
-}
-
-func (e *Evaluator) evalFuncArg(currentNode Result, arg *FuncArg, expectedType FunctionValueType) (interface{}, error) {
-	switch arg.Type {
-	case FuncArgLiteral:
-		// 字面量只能是 ValueType
-		if expectedType != FunctionValueTypeValue {
-			return nil, fmt.Errorf("literal cannot be converted to %s", expectedType)
-		}
-		return e.evalLiteral(arg.Literal), nil
-
-	case FuncArgFilterQuery:
-		nodes := e.evalFilterQuery(currentNode, arg.FilterQuery)
-		switch expectedType {
-		case FunctionValueTypeValue:
-			if len(nodes) == 1 {
-				return nodes[0], nil
+			var syntaxErr *iregexp.SyntaxError
+			if !errors.As(err, &syntaxErr) {
+				return functionValue{}, err
 			}
-			return FunctionValueNothing, nil
-		case FunctionValueTypeLogical:
-			return len(nodes) > 0, nil
-		case FunctionValueTypeNodes:
-			return nodes, nil
-		default:
-			return nil, fmt.Errorf("cannot convert nodes to %s", expectedType)
 		}
-
-	case FuncArgLogicalExpr:
-		if expectedType != FunctionValueTypeLogical {
-			return nil, fmt.Errorf("logical expression cannot be converted to %s", expectedType)
-		}
-		return e.evalFilterExpr(currentNode, arg.LogicalExpr), nil
-
-	case FuncArgFuncExpr:
-		fn := arg.FuncExpr
-		sig, exists := functionRegistry[fn.Name]
-		if !exists {
-			return nil, fmt.Errorf("unknown function: %s", fn.Name)
-		}
-		// 嵌套函数调用：期望类型必须与嵌套函数的返回类型匹配
-		resultAny, err := e.evalFuncCall(currentNode, fn, sig.ReturnType)
-		if err != nil {
-			return nil, err
-		}
-		// 类型兼容性检查
-		if expectedType != sig.ReturnType {
-			return nil, fmt.Errorf("type mismatch: %s() returns %s but %s is expected", fn.Name, sig.ReturnType, expectedType)
-		}
-		return resultAny, nil
-
-	default:
-		return nil, fmt.Errorf("unknown function argument type")
 	}
+	if r == nil {
+		return logicalResult(false), nil
+	}
+	if search {
+		return functionValue{logical: r.Search(text.String())}, nil
+	}
+	return functionValue{logical: r.Match(text.String())}, nil
+}
+
+func numberResult(n int) functionValue {
+	return functionValue{value: document.NewNumber(strconv.Itoa(n))}
+}
+
+func logicalResult(b bool) functionValue {
+	return functionValue{logical: b}
 }
