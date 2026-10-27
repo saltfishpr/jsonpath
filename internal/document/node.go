@@ -1,9 +1,7 @@
 // Package document 提供只读 JSON 节点树及保留原始文本的解析器。
 package document
 
-import (
-	"unicode/utf8"
-)
+import "unicode/utf8"
 
 type Kind uint8
 
@@ -48,14 +46,15 @@ type Member struct {
 //
 // 每个节点都需要独立的 parent 链，因此 null、true 和 false 节点也不共享单例。
 type Node struct {
-	kind Kind
-
-	raw     []byte   // 保留原始输入中的片段，供查询结果直接引用
+	kind    Kind
 	boolean bool     // KindBool
+	raw     []byte   // 保留原始输入中的片段，供查询结果直接引用
 	number  Number   // KindNumber: 构造时解析，之后只读
 	str     string   // KindString: 已解码的 UTF-8
 	arr     []*Node  // KindArray
 	members []Member // KindObject，按出现顺序存储
+
+	memberIndex map[string]*Node // 对象在解析阶段构建，之后只读
 
 	parent *Node  // 所属容器；根节点为 nil
 	index  int64  // 在父数组中的下标；非数组元素为 -1
@@ -116,12 +115,7 @@ func (n *Node) Len() int {
 
 // Get 返回指定名称的对象成员值；非对象节点或成员不存在时返回 nil。
 func (n *Node) Get(name string) *Node {
-	for _, member := range n.members {
-		if member.Name == name {
-			return member.Value
-		}
-	}
-	return nil
+	return n.memberIndex[name]
 }
 
 // Parent 返回所属容器；根节点返回 nil。

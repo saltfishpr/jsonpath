@@ -15,6 +15,9 @@ type evaluator struct {
 	root     *document.Node
 	literals map[*ast.Literal]*document.Node
 	regexes  map[string]*iregexp.Regexp
+
+	// 本次求值遇到的动态模式，按需创建。
+	dynamicRegexes map[string]*iregexp.Regexp
 }
 
 func (e *evaluator) query(q *ast.Query, current *document.Node) ([]*document.Node, error) {

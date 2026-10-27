@@ -25,7 +25,7 @@ import (
 )
 
 func main() {
-    doc, err := jsonpath.Parse([]byte(`{"books":[{"title":"Go","price":8},{"title":"Rust","price":12}]}`))
+    doc, err := jsonpath.ParseDocument([]byte(`{"books":[{"title":"Go","price":8},{"title":"Rust","price":12}]}`))
     if err != nil {
         log.Fatal(err)
     }

@@ -189,7 +189,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 		return p.newNode(KindObject), nil
 	}
 	var members []Member
-	var seen map[string]struct{}
+	memberIndex := make(map[string]*Node)
 	for {
 		p.skipWS()
 		if p.pos >= len(p.src) || p.src[p.pos] != '"' {
@@ -203,13 +203,9 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 		}
 		// RFC 8259 建议对象名唯一，I-JSON / RFC 7493 要求 MUST unique；
 		// 本包与之一致，显式拒绝重复键，避免查询语义不确定。
-		if seen == nil {
-			seen = make(map[string]struct{})
-		}
-		if _, dup := seen[key]; dup {
+		if _, dup := memberIndex[key]; dup {
 			return nil, &SyntaxError{Offset: keyPos, Message: fmt.Sprintf("duplicate object member %q", key)}
 		}
-		seen[key] = struct{}{}
 		p.skipWS()
 		if p.pos >= len(p.src) || p.src[p.pos] != ':' {
 			return nil, p.errf("expected ':' after object key")
@@ -220,6 +216,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
+		memberIndex[key] = val
 		members = append(members, Member{Name: key, Value: val})
 		p.skipWS()
 		if p.pos >= len(p.src) {
@@ -233,6 +230,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 			p.pos++
 			obj := p.newNode(KindObject)
 			obj.members = members
+			obj.memberIndex = memberIndex
 			for i := range members {
 				members[i].Value.parent = obj
 				members[i].Value.name = members[i].Name

@@ -56,17 +56,25 @@ func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValu
 		text.Kind() != document.KindString || pattern.Kind() != document.KindString {
 		return functionValue{}, nil
 	}
-	r, cached := e.regexes[pattern.String()]
+	patternText := pattern.String()
+	r, cached := e.regexes[patternText]
 	if !cached {
-		// Query 的缓存只读，动态模式不写入共享状态。
+		r, cached = e.dynamicRegexes[patternText]
+	}
+	if !cached {
 		var err error
-		r, err = iregexp.Compile(pattern.String())
+		r, err = iregexp.Compile(patternText)
 		if err != nil {
 			var syntaxErr *iregexp.SyntaxError
 			if !errors.As(err, &syntaxErr) {
 				return functionValue{}, err
 			}
 		}
+		if e.dynamicRegexes == nil {
+			e.dynamicRegexes = make(map[string]*iregexp.Regexp)
+		}
+		// nil 也写入缓存，避免对无效模式重复编译。
+		e.dynamicRegexes[patternText] = r
 	}
 	if r == nil {
 		return logicalResult(false), nil

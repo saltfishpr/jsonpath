@@ -89,7 +89,7 @@ func benchmarkDocument(size int) ([]byte, map[string]int) {
 	return []byte(out.String()), counts
 }
 
-func BenchmarkParse(b *testing.B) {
+func BenchmarkParseDocument(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
 			data, _ := benchmarkDocument(size)
@@ -97,7 +97,7 @@ func BenchmarkParse(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				if _, err := jsonpath.Parse(data); err != nil {
+				if _, err := jsonpath.ParseDocument(data); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -150,7 +150,7 @@ func BenchmarkQuery(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		b.Run(fmt.Sprintf("Books%d", size), func(b *testing.B) {
 			data, counts := benchmarkDocument(size)
-			doc, err := jsonpath.Parse(data)
+			doc, err := jsonpath.ParseDocument(data)
 			if err != nil {
 				b.Fatal(err)
 			}

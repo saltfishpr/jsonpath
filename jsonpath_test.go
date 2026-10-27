@@ -2,26 +2,24 @@ package jsonpath_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/saltfishpr/jsonpath"
 )
 
-const (
-	queryValuesNumbers = `[0,1,2,3,4]`
-	queryValuesRecords = `[{"id":0,"v":null},{"id":1,"v":false},{"id":2,"v":0},{"id":3,"v":""},{"id":4,"v":[]},{"id":5,"v":{}},{"id":6}]`
-	queryValuesStore   = `{"limit":10,"books":[{"title":"Go","price":8,"tags":["go","code"]},{"title":"Rust","price":12,"tags":["code"]},{"title":"JSON","price":10,"tags":[]}]}`
-)
-
-type queryValuesCase struct {
-	name string
-	expr string
-	data string
-	want []string
+type queryCase struct {
+	name  string
+	expr  string
+	data  string
+	want  []string
+	paths []string
 }
 
-func runQueryValuesCases(t *testing.T, tests []queryValuesCase) {
+func runQueryValuesCases(t *testing.T, tests []queryCase) {
 	t.Helper()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -29,6 +27,9 @@ func runQueryValuesCases(t *testing.T, tests []queryValuesCase) {
 			got, err := jsonpath.QueryValues(tt.expr, data)
 			if err != nil {
 				t.Fatalf("QueryValues(%q): %v", tt.expr, err)
+			}
+			if got == nil {
+				t.Fatal("QueryValues returned nil instead of a result slice")
 			}
 			if len(got) != len(tt.want) {
 				t.Fatalf("QueryValues(%q) = %s, want %q", tt.expr, got, tt.want)
@@ -45,391 +46,541 @@ func runQueryValuesCases(t *testing.T, tests []queryValuesCase) {
 	}
 }
 
-func TestQueryValues_Root(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"object", `$`, `{"a":1}`, []string{`{"a":1}`}},
-		{"array", `$`, queryValuesNumbers, []string{queryValuesNumbers}},
-		{"string", `$`, `"hello"`, []string{`"hello"`}},
-		{"number", `$`, `-1.25e+2`, []string{`-1.25e+2`}},
-		{"true", `$`, `true`, []string{`true`}},
-		{"false", `$`, `false`, []string{`false`}},
-		{"null", `$`, `null`, []string{`null`}},
-		{"empty_object", `$`, `{}`, []string{`{}`}},
-		{"empty_array", `$`, `[]`, []string{`[]`}},
-	})
-}
-
-func TestQueryValues_RawJSON(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"surrounding_whitespace", `$`, " \n { \"a\" : [1, 2] }\r\t", []string{`{ "a" : [1, 2] }`}},
-		{"nested_whitespace", `$.a`, `{"a": { "b" : [1,  2] }}`, []string{`{ "b" : [1,  2] }`}},
-		{"string_escapes", `$.a`, `{"a":"\u4e2d\n\"\\"}`, []string{`"\u4e2d\n\"\\"`}},
-		{"numbers", `$[*]`, `[-0,1.00,1e+2,9007199254740993]`, []string{`-0`, `1.00`, `1e+2`, `9007199254740993`}},
-	})
-}
-
-func TestQueryValues_NameSelector(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"dot", `$.a.b`, `{"a":{"b":1}}`, []string{`1`}},
-		{"brackets", `$['a']["b"]`, `{"a":{"b":1}}`, []string{`1`}},
-		{"special_characters", `$['a.b']['x y']['[0]']`, `{"a.b":{"x y":{"[0]":2}}}`, []string{`2`}},
-		{"empty", `$['']`, `{"":3}`, []string{`3`}},
-		{"unicode", `$.中文`, `{"中文":4}`, []string{`4`}},
-		{"escaped_unicode", `$['\u4e2d\u6587']`, `{"中文":4}`, []string{`4`}},
-		{"surrogate_pair", `$['\uD83D\uDE00']`, `{"😀":5}`, []string{`5`}},
-		{"escaped_quote", `$['it\'s']`, `{"it's":6}`, []string{`6`}},
-		{"escaped_backslash", `$['a\\b']`, `{"a\\b":7}`, []string{`7`}},
-		{"decoded_document_key", `$.a`, `{"\u0061":8}`, []string{`8`}},
-		{"missing", `$.missing`, `{"a":1}`, nil},
-		{"case_sensitive", `$.A`, `{"a":1}`, nil},
-		{"on_array", `$.a`, `[1,2]`, nil},
-		{"on_scalar", `$.a`, `1`, nil},
-		{"after_null", `$.a.b`, `{"a":null}`, nil},
-		{"numeric_key", `$['0']`, `{"0":"zero"}`, []string{`"zero"`}},
-		{"no_unicode_normalization", `$['é']`, `{"e\u0301":1}`, nil},
-	})
-}
-
-func TestQueryValues_IndexSelector(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"first", `$[0]`, queryValuesNumbers, []string{`0`}},
-		{"last", `$[-1]`, queryValuesNumbers, []string{`4`}},
-		{"negative_first", `$[-5]`, queryValuesNumbers, []string{`0`}},
-		{"out_of_bounds", `$[5]`, queryValuesNumbers, nil},
-		{"negative_out_of_bounds", `$[-6]`, queryValuesNumbers, nil},
-		{"empty_array", `$[0]`, `[]`, nil},
-		{"on_object", `$[0]`, `{"0":1}`, nil},
-		{"nested", `$[1][0]`, `[[1],[2,3]]`, []string{`2`}},
-	})
-}
-
-func TestQueryValues_Wildcard(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"array", `$[*]`, `[1,null,false,"x",[],{}]`, []string{`1`, `null`, `false`, `"x"`, `[]`, `{}`}},
-		{"object_order", `$.*`, `{"z":1,"a":2,"m":3}`, []string{`1`, `2`, `3`}},
-		{"bracket_object", `$[*]`, `{"z":1,"a":2}`, []string{`1`, `2`}},
-		{"empty_array", `$[*]`, `[]`, nil},
-		{"empty_object", `$.*`, `{}`, nil},
-		{"null", `$.*`, `null`, nil},
-		{"string", `$[*]`, `"abc"`, nil},
-		{"chained", `$[*][*]`, `[[1,2],[],[3]]`, []string{`1`, `2`, `3`}},
-		{"heterogeneous", `$[*].a`, `[{"a":1},null,2,{}, {"a":false}]`, []string{`1`, `false`}},
-	})
-}
-
-func TestQueryValues_MultipleSelectors(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"index_order_and_duplicates", `$[3,0,3,-1]`, queryValuesNumbers, []string{`3`, `0`, `3`, `4`}},
-		{"name_order_and_duplicates", `$['b','a','b','missing']`, `{"a":1,"b":2}`, []string{`2`, `1`, `2`}},
-		{"mixed_selectors", `$[0,2:4,*]`, queryValuesNumbers, []string{`0`, `2`, `3`, `0`, `1`, `2`, `3`, `4`}},
-		{"each_input", `$[*][1,0]`, `[[1,2],[3,4]]`, []string{`2`, `1`, `4`, `3`}},
-	})
-}
-
-func TestQueryValues_Slice(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"all", `$[:]`, queryValuesNumbers, []string{`0`, `1`, `2`, `3`, `4`}},
-		{"bounded", `$[1:4]`, queryValuesNumbers, []string{`1`, `2`, `3`}},
-		{"omitted_start", `$[:2]`, queryValuesNumbers, []string{`0`, `1`}},
-		{"omitted_end", `$[3:]`, queryValuesNumbers, []string{`3`, `4`}},
-		{"positive_step", `$[::2]`, queryValuesNumbers, []string{`0`, `2`, `4`}},
-		{"negative_bounds", `$[-4:-1]`, queryValuesNumbers, []string{`1`, `2`, `3`}},
-		{"clamped_bounds", `$[-99:99]`, queryValuesNumbers, []string{`0`, `1`, `2`, `3`, `4`}},
-		{"reverse", `$[::-1]`, queryValuesNumbers, []string{`4`, `3`, `2`, `1`, `0`}},
-		{"reverse_step", `$[4:0:-2]`, queryValuesNumbers, []string{`4`, `2`}},
-		{"reverse_clamped", `$[99:-99:-2]`, queryValuesNumbers, []string{`4`, `2`, `0`}},
-		{"explicit_negative_end", `$[:-1:-1]`, queryValuesNumbers, nil},
-		{"zero_step", `$[::0]`, queryValuesNumbers, nil},
-		{"equal_bounds", `$[2:2]`, queryValuesNumbers, nil},
-		{"wrong_direction", `$[4:1]`, queryValuesNumbers, nil},
-		{"reverse_wrong_direction", `$[1:4:-1]`, queryValuesNumbers, nil},
-		{"empty_array", `$[::-1]`, `[]`, nil},
-		{"on_object", `$[:]`, `{"a":1}`, nil},
-	})
-}
-
-func TestQueryValues_Descendant(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"name", `$..a`, `{"a":0,"nested":{"a":1},"items":[{"a":2}]}`, []string{`0`, `1`, `2`}},
-		{"wildcard", `$..*`, `[[1],2]`, []string{`[1]`, `2`, `1`}},
-		{"index", `$..[0]`, `[[1,2],[3,4]]`, []string{`[1,2]`, `1`, `3`}},
-		{"slice", `$..[1:]`, `[[1,2],[3,4]]`, []string{`[3,4]`, `2`, `4`}},
-		{"duplicates", `$..['a','a']`, `{"a":1,"x":{"a":2}}`, []string{`1`, `1`, `2`, `2`}},
-		{"scalar", `$..*`, `42`, nil},
-		{"followed_by_child", `$..books[*].title`, queryValuesStore, []string{`"Go"`, `"Rust"`, `"JSON"`}},
-	})
-}
-
-func TestQueryValues_Filter(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"existence_not_truthiness", `$[?@.v].id`, queryValuesRecords, []string{`0`, `1`, `2`, `3`, `4`, `5`}},
-		{"missing", `$[?!@.v].id`, queryValuesRecords, []string{`6`}},
-		{"null", `$[?@.v == null].id`, queryValuesRecords, []string{`0`}},
-		{"false", `$[?@.v == false].id`, queryValuesRecords, []string{`1`}},
-		{"zero", `$[?@.v == 0].id`, queryValuesRecords, []string{`2`}},
-		{"empty_string", `$[?@.v == ""].id`, queryValuesRecords, []string{`3`}},
-		{"two_missing_values", `$[?@.v == @.missing].id`, queryValuesRecords, []string{`6`}},
-		{"missing_not_null", `$[?@.v != null].id`, queryValuesRecords, []string{`1`, `2`, `3`, `4`, `5`, `6`}},
-		{"less", `$[?@ < 2]`, queryValuesNumbers, []string{`0`, `1`}},
-		{"less_equal", `$[?@ <= 2]`, queryValuesNumbers, []string{`0`, `1`, `2`}},
-		{"greater", `$[?@ > 2]`, queryValuesNumbers, []string{`3`, `4`}},
-		{"greater_equal", `$[?@ >= 2]`, queryValuesNumbers, []string{`2`, `3`, `4`}},
-		{"and", `$[?@ > 0 && @ < 3]`, queryValuesNumbers, []string{`1`, `2`}},
-		{"or", `$[?@ == 0 || @ == 4]`, queryValuesNumbers, []string{`0`, `4`}},
-		{"precedence", `$[?@ == 0 || @ >= 2 && @ < 4]`, queryValuesNumbers, []string{`0`, `2`, `3`}},
-		{"parentheses", `$[?(@ == 0 || @ >= 2) && @ < 3]`, queryValuesNumbers, []string{`0`, `2`}},
-		{"negation", `$[?!(@ < 3)]`, queryValuesNumbers, []string{`3`, `4`}},
-		{"root_reference", `$.books[?@.price <= $.limit].title`, queryValuesStore, []string{`"Go"`, `"JSON"`}},
-		{"negative_index", `$.books[?@.tags[-1] == "code"].title`, queryValuesStore, []string{`"Go"`, `"Rust"`}},
-		{"nested_filter", `$.books[?@.tags[?@ == "go"]].title`, queryValuesStore, []string{`"Go"`}},
-		{"object_values", `$[?@ >= 2]`, `{"z":3,"a":1,"b":2}`, []string{`3`, `2`}},
-		{"scalar", `$[?@ == 1]`, `1`, nil},
-		{"empty", `$[?@]`, `[]`, nil},
-		{"descendant", `$..[?@.price < 10].title`, queryValuesStore, []string{`"Go"`}},
-		{"mixed_union", `$[?@ > 3,0]`, queryValuesNumbers, []string{`4`, `0`}},
-	})
-}
-
-func TestQueryValues_Comparison(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"no_type_coercion", `$[?@ == 1]`, `[1,"1",true,null]`, []string{`1`}},
-		{"mixed_types_not_ordered", `$[?@ < 2]`, `[1,"1",true,null,[],{}]`, []string{`1`}},
-		{"strings", `$[?@ < "b"]`, `["a","b","c",1]`, []string{`"a"`}},
-		{"decoded_strings", `$[?@ == "中文"]`, `["\u4e2d\u6587","中文","other"]`, []string{`"\u4e2d\u6587"`, `"中文"`}},
-		{"number_representations", `$[?@ == 1]`, `[1,1.0,1e0,2]`, []string{`1`, `1.0`, `1e0`}},
-		{"signed_zero", `$[?@ == 0]`, `[-0,0,0.0,-0.0]`, []string{`-0`, `0`, `0.0`, `-0.0`}},
-		{"large_integer", `$[?@ > 9007199254740992]`, `[9007199254740992,9007199254740993]`, []string{`9007199254740993`}},
-		{"decimal_precision", `$[?@ > 1.0000000000000001]`, `[1.0000000000000001,1.0000000000000002]`, []string{`1.0000000000000002`}},
-		{"array_equality", `$[?@.a == @.b].id`, `[{"id":1,"a":[1,null],"b":[1.0,null]},{"id":2,"a":[1,2],"b":[2,1]},{"id":3,"a":[],"b":[1]}]`, []string{`1`}},
-		{"object_equality", `$[?@.a == @.b].id`, `[{"id":1,"a":{"x":1,"y":[]},"b":{"y":[],"x":1.0}},{"id":2,"a":{"x":1},"b":{"x":2}},{"id":3,"a":{},"b":{"x":1}}]`, []string{`1`}},
-	})
-}
-
-func TestQueryValues_NumberPrecision(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"zero_huge_exponent", `$[?@ == 0e-9223372036854775809]`, `[-0.00e+9223372036854775808,0e-9223372036854775809,1e-9223372036854775809]`, []string{`-0.00e+9223372036854775808`, `0e-9223372036854775809`}},
-		{"beyond_int64", `$[?@ > 9223372036854775808]`, `[9223372036854775808,9223372036854775809]`, []string{`9223372036854775809`}},
-		{"long_significand", `$[?@ == 123456789012345678901234567890.123456789]`, `[123456789012345678901234567890.123456788,123456789012345678901234567890.123456789]`, []string{`123456789012345678901234567890.123456789`}},
-		{"float64_overflow", `$[?@ > 1e309]`, `[1e309,2e309]`, []string{`2e309`}},
-		{"float64_underflow", `$[?@ > 0 && @ < 2e-400]`, `[0,1e-400,2e-400]`, []string{`1e-400`}},
-		{"huge_positive_exponent", `$[?@ > 1e9223372036854775808]`, `[1e9223372036854775808,1e9223372036854775809]`, []string{`1e9223372036854775809`}},
-		{"huge_negative_exponent", `$[?@ < 1e-9223372036854775809]`, `[1e-9223372036854775810,1e-9223372036854775809]`, []string{`1e-9223372036854775810`}},
-		{"normalized_huge_exponent", `$[?@ == 1e9223372036854775808]`, `[10e9223372036854775807,0.1e9223372036854775809,2e9223372036854775808]`, []string{`10e9223372036854775807`, `0.1e9223372036854775809`}},
-		{"negative_numbers", `$[?@ < -9223372036854775808]`, `[-9223372036854775809,-9223372036854775808]`, []string{`-9223372036854775809`}},
-		{"document_comparison", `$[?@.a < @.b].a`, `[{"a":1e9223372036854775808,"b":2e9223372036854775808},{"a":2e-9223372036854775809,"b":1e-9223372036854775809}]`, []string{`1e9223372036854775808`}},
-	})
-}
-
-func TestQueryValues_Functions(t *testing.T) {
-	runQueryValuesCases(t, []queryValuesCase{
-		{"length/string_codepoints", `$[?length(@) == 2]`, `["中文","😀a","abc","e\u0301"]`, []string{`"中文"`, `"😀a"`, `"e\u0301"`}},
-		{"length/containers", `$[?length(@) == 2]`, `[[1,2],{"a":1,"b":2},[],{}]`, []string{`[1,2]`, `{"a":1,"b":2}`}},
-		{"length/empty_values", `$[?length(@) == 0]`, `["",[],{},null,0,false]`, []string{`""`, `[]`, `{}`}},
-		{"length/unsupported_returns_nothing", `$[?length(@.v) == @.missing].id`, queryValuesRecords, []string{`0`, `1`, `2`, `6`}},
-		{"count/children", `$.books[?count(@.tags[*]) == 2].title`, queryValuesStore, []string{`"Go"`}},
-		{"count/missing", `$[?count(@.v) == 0].id`, queryValuesRecords, []string{`6`}},
-		{"count/null_is_node", `$[?count(@.v) == 1].id`, queryValuesRecords, []string{`0`, `1`, `2`, `3`, `4`, `5`}},
-		{"count/duplicates", `$[?count(@[0,0]) == 2]`, `[[1],[]]`, []string{`[1]`}},
-		{"value/single_node", `$.books[?value(@.tags[*]) == "code"].title`, queryValuesStore, []string{`"Rust"`}},
-		{"value/zero_or_multiple_nodes", `$[?value(@.v[*]) == @.missing].id`, `[{"id":0,"v":[]},{"id":1,"v":[1]},{"id":2,"v":[1,2]}]`, []string{`0`, `2`}},
-		{"value/null", `$[?value(@[*]) == null]`, `[[null],[],[null,null]]`, []string{`[null]`}},
-		{"functions/nested", `$[?length(value(@[*])) == 2]`, `[["中文"],["a"],[],["ab","cd"]]`, []string{`["中文"]`}},
-		{"match/full_string", `$[?match(@, "a+")]`, `["a","aa","ba","ab",1,null]`, []string{`"a"`, `"aa"`}},
-		{"search/substring", `$[?search(@, "a+")]`, `["a","ba","ab","b",1,null]`, []string{`"a"`, `"ba"`, `"ab"`}},
-		{"match/empty_pattern", `$[?match(@, "")]`, `["","a"]`, []string{`""`}},
-		{"search/empty_pattern", `$[?search(@, "")]`, `["","a",null]`, []string{`""`, `"a"`}},
-		{"match/invalid_pattern", `$[?match(@, "[")]`, `["a",""]`, nil},
-		{"search/invalid_pattern", `$[?search(@, "[")]`, `["a",""]`, nil},
-		{"match/non_string_pattern", `$[?match(@, 1)]`, `["a"]`, nil},
-		{"search/missing_argument_value", `$[?search(@.missing, "a")]`, `[{}]`, nil},
-		{"match/dynamic_pattern", `$[?match(@.text, @.pattern)].id`, `[{"id":1,"text":"abc","pattern":"a.*"},{"id":2,"text":"abc","pattern":"["},{"id":3,"text":"abc","pattern":null},{"id":4,"text":"abc"}]`, []string{`1`}},
-		{"search/dynamic_pattern", `$[?search(@.text, @.pattern)].id`, `[{"id":1,"text":"abc","pattern":"b"},{"id":2,"text":"abc","pattern":"z"}]`, []string{`1`}},
-		{"match/literal_anchors", `$[?match(@, "^a$")]`, `["a","^a$"]`, []string{`"^a$"`}},
-	})
-}
-
-func TestQueryValues_StringEscapes(t *testing.T) {
-	t.Run("valid", func(t *testing.T) {
-		runQueryValuesCases(t, []queryValuesCase{
-			{"decoded_surrogate_pair", `$[?@ == "😀"]`, `["\uD83D\uDE00","\ud83d\ude00","😀","other"]`, []string{`"\uD83D\uDE00"`, `"\ud83d\ude00"`, `"😀"`}},
-			{"decoded_control_escapes", `$[?@ == "\b\f\n\r\t/\\\""]`, `["\b\f\n\r\t\/\\\"","other"]`, []string{`"\b\f\n\r\t\/\\\""`}},
-		})
-	})
-	t.Run("invalid", func(t *testing.T) {
-		tests := []struct {
-			name string
-			data string
-		}{
-			{"truncated_unicode_escape", `"\u12`},
-			{"unpaired_high_surrogate", `"\uD83D"`},
-			{"unpaired_low_surrogate", `"\uDE00"`},
-			{"surrogate_followed_by_text", `"\uD83Dabcdef"`},
-			{"surrogate_followed_by_other_escape", `"\uD83D\nabcdef"`},
-			{"surrogate_followed_by_non_surrogate", `"\uD83D\u0041"`},
-			{"reversed_surrogate_pair", `"\uDE00\uD83D"`},
-			{"invalid_low_surrogate_hex", `"\uD83D\uZZZZ"`},
-			{"unterminated_escape", `"abc\`},
-			{"unterminated_escaped_string", `"abc\n`},
-			{"control_character_after_escape", "\"\\n\t\""},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				got, err := jsonpath.QueryValues(`$`, []byte(tt.data))
-				var documentErr *jsonpath.DocumentError
-				if !errors.As(err, &documentErr) {
-					t.Fatalf("QueryValues error = %v, want *jsonpath.DocumentError", err)
+func runQueryNodesCases(t *testing.T, tests []queryCase) {
+	t.Helper()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte(tt.data)
+			got, err := jsonpath.QueryNodes(tt.expr, data)
+			if err != nil {
+				t.Fatalf("QueryNodes(%q): %v", tt.expr, err)
+			}
+			if got == nil {
+				t.Fatal("QueryNodes returned nil instead of a result slice")
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("QueryNodes(%q) = %v, want %q", tt.expr, got, tt.want)
+			}
+			for i, want := range tt.want {
+				if string(got[i].Value) != want {
+					t.Errorf("result[%d].Value = %q, want %q", i, got[i].Value, want)
 				}
-				if got != nil {
-					t.Errorf("result = %s, want nil on error", got)
+			}
+			if tt.paths != nil {
+				if len(got) != len(tt.paths) {
+					t.Fatalf("QueryNodes(%q) = %d paths, want %d", tt.expr, len(got), len(tt.paths))
 				}
-			})
-		}
-	})
-}
-
-func TestQueryValues_InvalidExpression(t *testing.T) {
-	tests := []struct {
-		name string
-		expr string
-	}{
-		{"empty", ``},
-		{"missing_root", `books`},
-		{"current_node_at_root", `@.a`},
-		{"trailing_dot", `$.`},
-		{"incomplete_descendant", `$..`},
-		{"unclosed_bracket", `$[0`},
-		{"empty_selector", `$[]`},
-		{"trailing_comma", `$[0,]`},
-		{"unclosed_string", `$['a]`},
-		{"invalid_escape", `$['\x']`},
-		{"leading_zero_index", `$[01]`},
-		{"fractional_index", `$[1.5]`},
-		{"index_outside_exact_integer_range", `$[9007199254740992]`},
-		{"negative_index_outside_exact_integer_range", `$[-9007199254740992]`},
-		{"slice_start_outside_exact_integer_range", `$[9007199254740992:]`},
-		{"slice_end_outside_exact_integer_range", `$[:-9007199254740992]`},
-		{"slice_step_outside_exact_integer_range", `$[::9007199254740992]`},
-		{"too_many_slice_parts", `$[1:2:3:4]`},
-		{"empty_filter", `$[?]`},
-		{"incomplete_comparison", `$[?@ ==]`},
-		{"assignment", `$[?@ = 1]`},
-		{"arithmetic", `$[?@ + 1 == 2]`},
-		{"non_singular_comparison", `$[?@[*] == 1]`},
-		{"trailing_input", `$ garbage`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := jsonpath.QueryValues(tt.expr, []byte(`{"books":[1,2]}`))
-			if err == nil {
-				t.Fatalf("QueryValues(%q) = %s, want an error", tt.expr, got)
+				for i, want := range tt.paths {
+					if got[i].Path != want {
+						t.Errorf("result[%d].Path = %q, want %q", i, got[i].Path, want)
+					}
+				}
 			}
-			if got != nil {
-				t.Errorf("result = %s, want nil on error", got)
+			if !bytes.Equal(data, []byte(tt.data)) {
+				t.Error("QueryNodes modified the input document")
 			}
 		})
 	}
 }
 
-func TestQueryValues_CompileError(t *testing.T) {
-	tests := []struct {
-		name string
-		expr string
-	}{
-		{"unknown_function", `$[?unknown(@)]`},
-		{"too_few_arguments", `$[?match(@)]`},
-		{"too_many_arguments", `$[?length(@, @) == 1]`},
-		{"nodes_required", `$[?count(1) == 1]`},
-		{"value_required", `$[?length(@[*]) == 1]`},
-		{"logical_function_as_value", `$[?match(@, "a") == true]`},
-		{"value_function_as_test", `$[?length(@)]`},
-		{"nested_argument_type", `$[?length(count(1)) == 1]`},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := jsonpath.QueryValues(tt.expr, []byte(`[]`))
-			var compileErr *jsonpath.CompileError
-			if !errors.As(err, &compileErr) {
-				t.Fatalf("QueryValues(%q) error = %v, want *jsonpath.CompileError", tt.expr, err)
-			}
-			if got != nil {
-				t.Errorf("result = %s, want nil on error", got)
-			}
+func runQueryCases(t *testing.T, tests []queryCase) {
+	t.Helper()
+	t.Run("QueryValues", func(t *testing.T) { runQueryValuesCases(t, tests) })
+	t.Run("QueryNodes", func(t *testing.T) { runQueryNodesCases(t, tests) })
+}
+
+func TestQuerySelection(t *testing.T) {
+	runQueryCases(t, []queryCase{
+		{
+			name: "root preserves internal whitespace and number spelling",
+			expr: "$", data: " \r\n\t{ \"n\": 1.2300e+02, \"s\": \"\\u4e2d\" } \n",
+			want: []string{`{ "n": 1.2300e+02, "s": "\u4e2d" }`}, paths: []string{"$"},
+		},
+		{
+			name: "member preserves escaped string",
+			expr: "$.s", data: `{"s":"\u4e2d\/\"\\\b\f\n\r\t\uD83D\uDE00"}`,
+			want: []string{`"\u4e2d\/\"\\\b\f\n\r\t\uD83D\uDE00"`}, paths: []string{"$['s']"},
+		},
+		{
+			name: "union preserves order and duplicates",
+			expr: "$[2,0,-1,0]", data: `[null,true,false]`,
+			want: []string{"false", "null", "false", "null"}, paths: []string{"$[2]", "$[0]", "$[2]", "$[0]"},
+		},
+		{
+			name: "each input retains all union results",
+			expr: "$[*][1,0,1]", data: `[[0,1],[2,3]]`,
+			want:  []string{"1", "0", "1", "3", "2", "3"},
+			paths: []string{"$[0][1]", "$[0][0]", "$[0][1]", "$[1][1]", "$[1][0]", "$[1][1]"},
+		},
+		{
+			name: "descendant follows nested objects and arrays",
+			expr: "$..v", data: `{"v":0,"items":[{"v":1},{"nested":{"v":2}}]}`,
+			want: []string{"0", "1", "2"}, paths: []string{"$['v']", "$['items'][0]['v']", "$['items'][1]['nested']['v']"},
+		},
+		{
+			name: "filter object members by existence even for false and null",
+			expr: "$[?@.flag].flag", data: `{"a":{"flag":false},"b":{"flag":null},"c":{}}`,
+			want: []string{"false", "null"}, paths: []string{"$['a']['flag']", "$['b']['flag']"},
+		},
+		{
+			name: "root reference in filter",
+			expr: "$.items[?@.n >= $.min].n", data: `{"min":2,"items":[{"n":1},{"n":2},{"n":3}]}`,
+			want: []string{"2", "3"}, paths: []string{"$['items'][1]['n']", "$['items'][2]['n']"},
+		},
+		{
+			name: "positive slice clamps bounds",
+			expr: "$[-99:99:2]", data: `[0,1,2,3,4]`,
+			want: []string{"0", "2", "4"}, paths: []string{"$[0]", "$[2]", "$[4]"},
+		},
+		{
+			name: "negative slice clamps bounds",
+			expr: "$[99:-99:-2]", data: `[0,1,2,3,4]`,
+			want: []string{"4", "2", "0"}, paths: []string{"$[4]", "$[2]", "$[0]"},
+		},
+		{
+			name: "largest interoperable positive step",
+			expr: "$[::9007199254740991]", data: `[0,1,2]`, want: []string{"0"}, paths: []string{"$[0]"},
+		},
+		{
+			name: "largest interoperable negative step",
+			expr: "$[::-9007199254740991]", data: `[0,1,2]`, want: []string{"2"}, paths: []string{"$[2]"},
+		},
+		{name: "missing member", expr: "$.missing", data: `{}`},
+		{name: "missing intermediate member", expr: "$.missing.child", data: `{}`},
+		{name: "out of range indexes", expr: "$[-4,3]", data: `[0,1,2]`},
+		{name: "zero step", expr: "$[::0]", data: `[0,1,2]`},
+		{name: "reverse slice with explicit negative end", expr: "$[:-1:-1]", data: `[0,1,2]`},
+		{name: "slice on object", expr: "$[:]", data: `{"a":1}`},
+		{name: "wildcard on scalar", expr: "$[*]", data: `42`},
+		{name: "filter on scalar", expr: "$[?@]", data: `true`},
+		{name: "wildcard on empty array", expr: "$[*]", data: `[]`},
+		{name: "wildcard on empty object", expr: "$[*]", data: `{}`},
+	})
+	for _, data := range []string{"null", "true", "false", "-0", `""`, "[]", "{}"} {
+		t.Run("root "+data, func(t *testing.T) {
+			runQueryCases(t, []queryCase{{name: "scalar or empty container", expr: "$", data: data, want: []string{data}, paths: []string{"$"}}})
 		})
 	}
 }
 
-func TestQueryValues_InvalidDocument(t *testing.T) {
-	tests := []struct {
-		name string
-		data string
-	}{
-		{"empty", ``},
-		{"whitespace_only", " \n\t\r"},
-		{"unclosed_object", `{"a":1`},
-		{"unclosed_array", `[1,2`},
-		{"unclosed_string", `"abc`},
-		{"missing_colon", `{"a" 1}`},
-		{"missing_value", `{"a":}`},
-		{"unquoted_key", `{a:1}`},
-		{"object_trailing_comma", `{"a":1,}`},
-		{"array_trailing_comma", `[1,]`},
-		{"missing_comma", `[1 2]`},
-		{"single_quoted_string", `'abc'`},
-		{"invalid_escape", `"\x"`},
-		{"invalid_unicode_escape", `"\uZZZZ"`},
-		{"unescaped_control_character", "\"a\nb\""},
-		{"invalid_literal", `undefined`},
-		{"incomplete_literal", `tru`},
-		{"leading_zero", `01`},
-		{"leading_plus", `+1`},
-		{"missing_integer", `.1`},
-		{"missing_fraction", `1.`},
-		{"missing_exponent", `1e+`},
-		{"multiple_values", `{} []`},
-		{"trailing_garbage", `null x`},
-		{"comment", `/* comment */ {}`},
-		{"bom", "\xef\xbb\xbf{}"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := jsonpath.QueryValues(`$`, []byte(tt.data))
-			var documentErr *jsonpath.DocumentError
-			if !errors.As(err, &documentErr) {
-				t.Fatalf("QueryValues error = %v, want *jsonpath.DocumentError", err)
-			}
-			if got != nil {
-				t.Errorf("result = %s, want nil on error", got)
-			}
-		})
-	}
-	t.Run("nil_input", func(t *testing.T) {
-		got, err := jsonpath.QueryValues(`$`, nil)
-		var documentErr *jsonpath.DocumentError
-		if !errors.As(err, &documentErr) || got != nil {
-			t.Fatalf("QueryValues(nil) = (%s, %v), want (nil, *jsonpath.DocumentError)", got, err)
-		}
-	})
-	t.Run("invalid_unselected_subtree", func(t *testing.T) {
-		got, err := jsonpath.QueryValues(`$.a`, []byte(`{"a":1,"b":[}`))
-		var documentErr *jsonpath.DocumentError
-		if !errors.As(err, &documentErr) || got != nil {
-			t.Fatalf("QueryValues = (%s, %v), want (nil, *jsonpath.DocumentError)", got, err)
-		}
+func TestQueryNormalizedPaths(t *testing.T) {
+	const depth = 40
+	runQueryCases(t, []queryCase{
+		{
+			name: "escaped and Unicode member names",
+			expr: `$["'\\\b\f\n\r\t\u0000\u001f中😀\"/"][""][0]`,
+			data: `{"'\\\b\f\n\r\t\u0000\u001f中😀\"/":{"": [7]}}`,
+			want: []string{"7"}, paths: []string{`$['\'\\\b\f\n\r\t\u0000\u001f中😀"/'][''][0]`},
+		},
+		{
+			name: "path exceeds initial ancestor capacity",
+			expr: "$" + strings.Repeat("[0]", depth), data: strings.Repeat("[", depth) + "7" + strings.Repeat("]", depth),
+			want: []string{"7"}, paths: []string{"$" + strings.Repeat("[0]", depth)},
+		},
 	})
 }
 
-func TestQueryValues_SharesInput(t *testing.T) {
-	data := []byte(`{"value": [1, 2]}`)
-	got, err := jsonpath.QueryValues(`$.value`, data)
+func TestQueryFunctions(t *testing.T) {
+	runQueryCases(t, []queryCase{
+		{
+			name: "length counts Unicode code points",
+			expr: "$[?length(@) == 3]", data: `["中😀a","e\u0301","\uD83D\uDE00",[],{},null,1,true]`,
+			want: []string{`"中😀a"`}, paths: []string{"$[0]"},
+		},
+		{
+			name: "length handles containers and Nothing",
+			expr: "$[?length(@.v) == 2]", data: `[{"v":[0,1]},{"v":{"a":1,"b":2}},{"v":false},{}]`,
+			want: []string{`{"v":[0,1]}`, `{"v":{"a":1,"b":2}}`}, paths: []string{"$[0]", "$[1]"},
+		},
+		{
+			name: "count preserves duplicate nodes",
+			expr: "$[?count(@[0,0]) == 2]", data: `[[null],[],{}]`, want: []string{`[null]`}, paths: []string{"$[0]"},
+		},
+		{
+			name: "value requires exactly one node and distinguishes null",
+			expr: "$[?value(@[*]) == null]", data: `[[null],[],[null,null],[false]]`,
+			want: []string{`[null]`}, paths: []string{"$[0]"},
+		},
+		{
+			name: "nested function results adapt to ValueType",
+			expr: "$[?length(value(@[*])) == 2]", data: `[["中😀"],["x","y"],[]]`,
+			want: []string{`["中😀"]`}, paths: []string{"$[0]"},
+		},
+		{
+			name: "singular query argument with negative index",
+			expr: "$[?length(@.a[-1]) == 1]", data: `[{"a":["xx","中"]},{"a":[]},{"a":false},{}]`,
+			want: []string{`{"a":["xx","中"]}`}, paths: []string{"$[0]"},
+		},
+		{
+			name: "singular query stops at missing intermediate member",
+			expr: "$[?length(@.a.b) == 1]", data: `[{},{"a":{"b":"x"}}]`,
+			want: []string{`{"a":{"b":"x"}}`}, paths: []string{"$[1]"},
+		},
+		{
+			name: "dynamic patterns including repeated invalid patterns",
+			expr: "$[?match(@.s,@.p)].id",
+			data: `[{"id":0,"s":"aa","p":"a+"},{"id":1,"s":"a","p":"a+"},{"id":2,"s":"a","p":"["},{"id":3,"s":"b","p":"["},{"id":4,"s":1,"p":"a"},{"id":5,"s":"a"},{"id":6,"s":"a","p":true}]`,
+			want: []string{"0", "1"}, paths: []string{"$[0]['id']", "$[1]['id']"},
+		},
+		{
+			name: "invalid literal patterns evaluate false",
+			expr: `$[?match(@,"[") || search(@,"[")]`, data: `["a","b"]`,
+		},
+		{
+			name: "caret and dollar are literal characters",
+			expr: `$[?match(@,"^a$")]`, data: `["a","^a$","x^a$y"]`, want: []string{`"^a$"`}, paths: []string{"$[1]"},
+		},
+		{
+			name: "search matches substring",
+			expr: `$[?search(@,"^a$")]`, data: `["a","^a$","x^a$y"]`,
+			want: []string{`"^a$"`, `"x^a$y"`}, paths: []string{"$[1]", "$[2]"},
+		},
+	})
+}
+
+func TestQueryExactNumberComparison(t *testing.T) {
+	tests := []struct {
+		name, left, op, right string
+		want                  bool
+	}{
+		{"beyond float precision", "9007199254740993", ">", "9007199254740992", true},
+		{"equivalent decimal spelling", "1.2300e2", "==", "123", true},
+		{"negative zero", "-0.0e999999999999999999999", "==", "0", true},
+		{"negative numbers", "-2", "<", "-1", true},
+		{"negative versus zero", "-1", "<", "0", true},
+		{"positive versus negative", "1", ">", "-1", true},
+		{"zero versus positive", "0", "<", "1", true},
+		{"positive versus zero", "1", ">", "0", true},
+		{"different digit lengths", "1.2", "<", "1.21", true},
+		{"different digit lengths reversed", "1.21", ">", "1.2", true},
+		{"huge positive exponents", "1e9223372036854775808", "==", "10e9223372036854775807", true},
+		{"huge negative exponents", "1e-9223372036854775809", "==", "0.1e-9223372036854775808", true},
+		{"huge exponent ordering", "1e999999999999999999999", ">", "9e999999999999999999998", true},
+		{"huge versus ordinary exponent", "1e9223372036854775808", ">", "1", true},
+		{"ordinary versus huge exponent", "1", "<", "1e9223372036854775808", true},
+		{"exponent normalization returns to int64", "0.1e9223372036854775808", "==", "1e9223372036854775807", true},
+		{"fraction adjustment underflows int64", "0.1e-9223372036854775808", "<", "1e-9223372036854775808", true},
+		{"same magnitude with unequal digits", "12e9223372036854775807", "<", "13e9223372036854775807", true},
+		{"huge negative number", "-1e999999999999999999999", "<=", "-1e999999999999999999999", true},
+		{"different types are unequal", "1", "==", `"1"`, false},
+		{"null equality", "null", "==", "null", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tc := queryCase{
+				name: "comparison", expr: fmt.Sprintf("$[?@.a %s @.b].a", tt.op),
+				data: fmt.Sprintf(`[{"a":%s,"b":%s}]`, tt.left, tt.right),
+			}
+			if tt.want {
+				tc.want, tc.paths = []string{tt.left}, []string{"$[0]['a']"}
+			}
+			runQueryCases(t, []queryCase{tc})
+		})
+	}
+	runQueryCases(t, []queryCase{
+		{
+			name: "Nothing equals Nothing but differs from null",
+			expr: "$[?@.a == @.b]", data: `[{},{"a":null},{"a":null,"b":null}]`,
+			want: []string{`{}`, `{"a":null,"b":null}`}, paths: []string{"$[0]", "$[2]"},
+		},
+		{
+			name: "object equality compares names and nested values",
+			expr: "$[?@.a == @.b].id",
+			data: `[{"id":0,"a":{"x":[1,null]},"b":{"x":[1.0,null]}},{"id":1,"a":{"x":1},"b":{"y":1}},{"id":2,"a":[1],"b":[1,2]},{"id":3,"a":[1],"b":[2]}]`,
+			want: []string{"0"}, paths: []string{"$[0]['id']"},
+		},
+	})
+}
+
+func TestQueryRegexp(t *testing.T) {
+	tests := []struct {
+		name, pattern, text string
+		want                bool
+	}{
+		{"exact repetition with leading zeros", "a{0002}", "aa", true},
+		{"bounded repetition", "a{1,3}", "aaa", true},
+		{"unbounded repetition", "a{2,}", "aaaa", true},
+		{"zero repetitions", "a{0}", "", true},
+		{"alternation", "(a|bc){2}", "abc", true},
+		{"dot excludes carriage return", ".", "\r", false},
+		{"dot excludes newline", ".", "\n", false},
+		{"dot includes Unicode", ".", "😀", true},
+		{"Unicode category", `\p{L}+`, "中文", true},
+		{"negated Unicode category", `\P{N}+`, "中文", true},
+		{"leading and trailing hyphens", "[-a-]+", "-aa-", true},
+		{"negated character class", "[^a]+", "中文", true},
+		{"Unicode category in class", `[\p{L}]+`, "中文", true},
+		{"escaped range endpoints match", `[\n-\r]+`, "\n\r", true},
+		{"escaped range endpoints", `[\n-\r]+`, "\n\t", false},
+		{"escaped characters in class", `[\n\r\t\[\]\\\^\-]+`, "\n\r\t[]\\^-", true},
+		{"exact repetition beyond RE2 limit", "a{1001}", strings.Repeat("a", 1001), true},
+		{"optional unrolled repetitions", "a{0,1001}", strings.Repeat("a", 1000), true},
+		{"unbounded unrolled repetitions", "a{1001,}", strings.Repeat("a", 1002), true},
+		{"nested repetition beyond RE2 weight limit", "(a{100}){11}", strings.Repeat("a", 1100), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pattern, err := json.Marshal(tt.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			value, err := json.Marshal(tt.text)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc := queryCase{name: "match", expr: fmt.Sprintf("$[?match(@,%s)]", pattern), data: "[" + string(value) + "]"}
+			if tt.want {
+				tc.want, tc.paths = []string{string(value)}, []string{"$[0]"}
+			}
+			runQueryCases(t, []queryCase{tc})
+		})
+	}
+	for _, pattern := range []string{
+		"[", "[]", "[a-b-c]", "[[]", "[a-", "[a-]x]", "[a-[]", "[z-a]", `[\p{L}-a]`, `[a-\p{L}]`, `[\p{X}]`,
+		`[\q]`, `[a-\q]`, `\`, `\q`, `\pL`, `\p{`, `\p{Invalid}`, `\p{}`, `\p{X}`, `\p{Lx}`,
+		"(", ")", "*", "a{}", "a{2", "a{2,", "a{2,x}", "a{3,2}",
+	} {
+		t.Run("invalid pattern "+pattern, func(t *testing.T) {
+			quoted, err := json.Marshal(pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runQueryCases(t, []queryCase{{
+				name: "invalid I-Regexp is false", expr: fmt.Sprintf("$[?match(@,%s) || search(@,%s)]", quoted, quoted), data: `["a",""]`,
+			}})
+		})
+	}
+}
+
+func TestQueryResultSharesInput(t *testing.T) {
+	data := []byte(`{"v": [ 1.00, "\u4e2d" ]}`)
+	want := []byte(`[ 1.00, "\u4e2d" ]`)
+	start := bytes.Index(data, want)
+	values, err := jsonpath.QueryValues("$.v", data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || string(got[0]) != `[1, 2]` {
-		t.Fatalf("result = %s, want [[1, 2]]", got)
+	nodes, err := jsonpath.QueryNodes("$.v", data)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 比较地址来验证共享内存，避免修改调用方应保持只读的输入或结果。
-	start := bytes.Index(data, []byte(`[1, 2]`))
-	if &got[0][0] != &data[start] {
-		t.Error("result does not share the input document's backing array")
+	if len(values) != 1 || len(nodes) != 1 {
+		t.Fatalf("got %d values and %d nodes, want one of each", len(values), len(nodes))
 	}
+	if !bytes.Equal(values[0], want) || !bytes.Equal(nodes[0].Value, want) {
+		t.Fatalf("results = %s, %s, want %s", values[0], nodes[0].Value, want)
+	}
+	if &values[0][0] != &data[start] || &nodes[0].Value[0] != &data[start] {
+		t.Error("results do not share the input byte slice")
+	}
+}
+
+type queryErrorCase struct {
+	name, expr, data, kind, message string
+	offset                          int // -1 表示只检查错误类型和消息。
+}
+
+func runQueryErrorCases(t *testing.T, tests []queryErrorCase) {
+	t.Helper()
+	queries := []struct {
+		name string
+		run  func(string, []byte) (bool, error)
+	}{
+		{"QueryValues", func(expr string, data []byte) (bool, error) {
+			got, err := jsonpath.QueryValues(expr, data)
+			return got == nil, err
+		}},
+		{"QueryNodes", func(expr string, data []byte) (bool, error) {
+			got, err := jsonpath.QueryNodes(expr, data)
+			return got == nil, err
+		}},
+	}
+	for _, query := range queries {
+		t.Run(query.name, func(t *testing.T) {
+			for _, tt := range tests {
+				t.Run(tt.name, func(t *testing.T) {
+					data := []byte(tt.data)
+					nilResult, err := query.run(tt.expr, data)
+					if err == nil {
+						t.Fatal("expected an error")
+					}
+					if !nilResult {
+						t.Error("query returned results on failure")
+					}
+					var compileErr *jsonpath.CompileError
+					var documentErr *jsonpath.DocumentError
+					switch tt.kind {
+					case "compile":
+						if !errors.As(err, &compileErr) {
+							t.Fatalf("error = %T: %v, want *CompileError", err, err)
+						}
+						if tt.offset >= 0 && compileErr.Offset != tt.offset {
+							t.Errorf("offset = %d, want %d", compileErr.Offset, tt.offset)
+						}
+					case "document":
+						if !errors.As(err, &documentErr) {
+							t.Fatalf("error = %T: %v, want *DocumentError", err, err)
+						}
+						if tt.offset >= 0 && documentErr.Offset != tt.offset {
+							t.Errorf("offset = %d, want %d", documentErr.Offset, tt.offset)
+						}
+					case "limit":
+						if errors.As(err, &compileErr) || errors.As(err, &documentErr) {
+							t.Errorf("implementation limit returned as %T: %v", err, err)
+						}
+					default:
+						t.Fatalf("unknown error kind %q", tt.kind)
+					}
+					if !strings.Contains(err.Error(), tt.message) {
+						t.Errorf("error = %q, want substring %q", err, tt.message)
+					}
+					if !bytes.Equal(data, []byte(tt.data)) {
+						t.Error("query modified the input document on failure")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestQueryCompileErrors(t *testing.T) {
+	runQueryErrorCases(t, []queryErrorCase{
+		{name: "empty query", expr: "", data: `null`, kind: "compile", message: "compile error at offset 0", offset: 0},
+		{name: "unexpected EOF uses byte offset", expr: "$.中[", data: `null`, kind: "compile", message: "end of input", offset: len("$.中[")},
+		{name: "invalid UTF-8", expr: "$['\xff']", data: `null`, kind: "compile", message: "UTF-8", offset: 3},
+		{name: "query error precedes document error", expr: "$[", data: `{`, kind: "compile", message: "end of input", offset: 2},
+		{name: "leading whitespace", expr: " $", data: `null`, kind: "compile", message: "whitespace", offset: 1},
+		{name: "trailing whitespace", expr: "$ ", data: `null`, kind: "compile", message: "whitespace", offset: 2},
+		{name: "unknown function", expr: "$[?unknown(@)]", data: `[]`, kind: "compile", message: `unknown function "unknown"`, offset: 3},
+		{name: "wrong argument count", expr: "$[?length(@,@) == 0]", data: `[]`, kind: "compile", message: "expected 1 arguments, got 2", offset: 3},
+		{name: "logical function passed as value", expr: `$[?length(match(@,"a")) == 0]`, data: `[]`, kind: "compile", message: "expected ValueType, got LogicalType", offset: 10},
+		{name: "value function passed as nodes", expr: "$[?count(length(@)) == 0]", data: `[]`, kind: "compile", message: "expected NodesType, got ValueType", offset: 9},
+		{name: "nonsingular function argument", expr: "$[?length(@[*]) == 0]", data: `[]`, kind: "compile", message: "expected ValueType or singular query", offset: 10},
+		{name: "logical comparison left operand", expr: `$[?match(@,"a") == true]`, data: `[]`, kind: "compile", message: "left operand", offset: -1},
+		{name: "logical comparison right operand", expr: `$[?true == match(@,"a")]`, data: `[]`, kind: "compile", message: "right operand", offset: -1},
+		{name: "invalid nested filter in disjunction", expr: "$[?@.a || unknown(@)]", data: `[]`, kind: "compile", message: "unknown function", offset: -1},
+		{name: "invalid nested filter in conjunction", expr: "$[?@.a && unknown(@)]", data: `[]`, kind: "compile", message: "unknown function", offset: -1},
+		{name: "invalid function inside function argument", expr: "$[?length(unknown(@)) == 0]", data: `[]`, kind: "compile", message: "unknown function", offset: -1},
+		{name: "invalid nested query", expr: "$[?count(@[?unknown(@)]) == 0]", data: `[]`, kind: "compile", message: "unknown function", offset: -1},
+	})
+}
+
+func TestQuerySyntaxErrors(t *testing.T) {
+	tests := []struct{ name, expr string }{
+		{"token after root", "$@"},
+		{"invalid descendant bracket", "$..["},
+		{"invalid slice end", "$[1:true]"},
+		{"disjunction with value operand", "$[?@.a || 1]"},
+		{"conjunction with value operand", "$[?@.a && 1]"},
+		{"repeated negation", "$[?!!@.a]"},
+		{"negation missing operand", "$[?!]"},
+		{"unparenthesized negated comparison", "$[?!@.a == 1]"},
+		{"negation of value", "$[?!1]"},
+		{"nonsingular right comparison operand", "$[?1 == @[*]]"},
+		{"logical right comparison operand", "$[?1 == (@.a || @.b)]"},
+		{"unterminated parenthesized expression", "$[?(@.a]"},
+		{"invalid filter subquery", "$[?@.]"},
+		{"function name followed by whitespace", "$[?length (@) == 0]"},
+		{"uppercase function name", "$[?Length(@) == 0]"},
+		{"Unicode function name", "$[?len中(@) == 0]"},
+		{"unterminated function call", "$[?length(@]"},
+		{"missing function argument", "$[?match(@,) ]"},
+		{"invalid inequality operator", "$[?@ <> 1]"},
+		{"invalid arithmetic operator", "$[?@ + 1]"},
+		{"dangling query escape", "$['a\\"},
+		{"negative number followed by invalid digit", "$[?@ == -x]"},
+	}
+	cases := make([]queryErrorCase, 0, len(tests))
+	for _, tt := range tests {
+		cases = append(cases, queryErrorCase{
+			name: tt.name, expr: tt.expr, data: `[]`, kind: "compile", message: "compile error", offset: -1,
+		})
+	}
+	runQueryErrorCases(t, cases)
+}
+
+func TestQueryDocumentErrors(t *testing.T) {
+	tests := []queryErrorCase{
+		{name: "empty document", data: "", message: "unexpected end", offset: 0},
+		{name: "only whitespace", data: " \n\t", message: "unexpected end", offset: 3},
+		{name: "BOM", data: "\xef\xbb\xbf{}", message: "byte order mark", offset: 0},
+		{name: "trailing data", data: "{} true", message: "trailing data", offset: 3},
+		{name: "unexpected character", data: "+1", message: "unexpected character", offset: 0},
+		{name: "invalid literal", data: "tru", message: "invalid literal", offset: 0},
+		{name: "missing object key", data: `{1:0}`, message: "string key", offset: 1},
+		{name: "missing colon", data: `{"a" 0}`, message: "expected ':'", offset: 5},
+		{name: "missing object value", data: `{"a":}`, message: "unexpected character", offset: 5},
+		{name: "unterminated object", data: `{"a":0`, message: "unexpected end of input in object", offset: 6},
+		{name: "missing object comma", data: `{"a":0 "b":1}`, message: "expected ','", offset: 7},
+		{name: "duplicate decoded member", data: `{"a":1,"\u0061":2}`, message: "duplicate", offset: 7},
+		{name: "invalid escaped key", data: `{"\q":1}`, message: "invalid escape", offset: 3},
+		{name: "unterminated array", data: `[1`, message: "unexpected end of input in array", offset: 2},
+		{name: "missing array comma", data: `[1 2]`, message: "expected ','", offset: 3},
+		{name: "array trailing comma", data: `[1,]`, message: "unexpected character", offset: 3},
+		{name: "unterminated string", data: `"abc`, message: "unterminated string", offset: 4},
+		{name: "dangling string escape", data: "\"abc\\", message: "unterminated escape", offset: 4},
+		{name: "raw control character", data: "\"a\nb\"", message: "control character", offset: 2},
+		{name: "invalid UTF-8 string", data: "\"\xff\"", message: "UTF-8", offset: 1},
+		{name: "invalid string escape", data: `"\q"`, message: "invalid escape", offset: 2},
+		{name: "short Unicode escape", data: `"\u12"`, message: "short \\u escape", offset: 2},
+		{name: "invalid Unicode escape", data: `"\uZZZZ"`, message: "invalid \\u escape", offset: 2},
+		{name: "unpaired high surrogate", data: `"\uD800"`, message: "surrogate pair", offset: 7},
+		{name: "unpaired low surrogate", data: `"\uDC00"`, message: "surrogate pair", offset: 7},
+		{name: "invalid second surrogate escape", data: `"\uD800\uZZZZ"`, message: "invalid \\u escape in surrogate pair", offset: 7},
+		{name: "invalid second surrogate value", data: `"\uD800\u0041"`, message: "surrogate pair", offset: 7},
+		{name: "minus without digits", data: `-`, message: "invalid number", offset: 1},
+		{name: "invalid integer digit", data: `-x`, message: "invalid number", offset: 1},
+		{name: "leading zero", data: `01`, message: "trailing data", offset: 1},
+		{name: "missing fraction digits", data: `1.`, message: "fraction digits", offset: 2},
+		{name: "missing exponent digits", data: `1e+`, message: "exponent digits", offset: 3},
+		{name: "array exceeds nesting limit", data: strings.Repeat("[", 10001) + "0" + strings.Repeat("]", 10001), message: "max nesting depth", offset: 10000},
+		{name: "object exceeds nesting limit", data: strings.Repeat(`{"a":`, 10001) + "0" + strings.Repeat("}", 10001), message: "max nesting depth", offset: 50000},
+	}
+	for i := range tests {
+		tests[i].expr, tests[i].kind = "$", "document"
+	}
+	runQueryErrorCases(t, tests)
+}
+
+func TestQueryRegexpLimits(t *testing.T) {
+	patterns := []struct{ name, pattern, message string }{
+		{"nesting", strings.Repeat("(", 129) + "a" + strings.Repeat(")", 129), "nesting exceeds safety limit"},
+		{"expanded size", "a{9000000}", "translated pattern exceeds safety limit"},
+		{"expansion multiplication overflow", "(ab){9223372036854775807}", "translated pattern exceeds safety limit"},
+		{"minimum count overflow", "a{999999999999999999999}", "quantifier minimum exceeds implementation limit"},
+		{"maximum count overflow", "a{1,999999999999999999999}", "quantifier maximum exceeds implementation limit"},
+	}
+	for _, pattern := range patterns {
+		t.Run(pattern.name, func(t *testing.T) {
+			quoted, err := json.Marshal(pattern.pattern)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runQueryErrorCases(t, []queryErrorCase{
+				{name: "literal pattern", expr: fmt.Sprintf("$[?match(@,%s)]", quoted), data: `["a"]`, kind: "limit", message: pattern.message, offset: -1},
+				{name: "dynamic pattern after successful result", expr: "$[?match(@.s,@.p)]", data: fmt.Sprintf(`[{"s":"a","p":"a"},{"s":"a","p":%s}]`, quoted), kind: "limit", message: pattern.message, offset: -1},
+			})
+		})
+	}
+	pattern := strings.Repeat("(", 129) + "a" + strings.Repeat(")", 129)
+	quoted, err := json.Marshal(pattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := fmt.Sprintf(`{"s":"a","p":%s}`, quoted)
+	tests := []queryErrorCase{
+		{name: "object filter", expr: "$[?search(@.s,@.p)]", data: `{"a":` + item + `}`},
+		{name: "descendant array", expr: "$..[?search(@.s,@.p)]", data: `[[` + item + `]]`},
+		{name: "descendant object", expr: "$..[?search(@.s,@.p)]", data: `{"a":{"b":` + item + `}}`},
+		{name: "disjunction", expr: "$[?@.missing || search(@.s,@.p)]", data: `[` + item + `]`},
+		{name: "conjunction", expr: "$[?@.s && search(@.s,@.p)]", data: `[` + item + `]`},
+		{name: "negation", expr: "$[?!search(@.s,@.p)]", data: `[` + item + `]`},
+		{name: "left comparison operand", expr: "$[?count(@[?search(@.s,@.p)]) == 0]", data: `[[` + item + `]]`},
+		{name: "right comparison operand", expr: "$[?0 == count(@[?search(@.s,@.p)])]", data: `[[` + item + `]]`},
+		{name: "nested function argument", expr: "$[?length(value(@[?search(@.s,@.p)])) == 0]", data: `[[` + item + `]]`},
+	}
+	for i := range tests {
+		tests[i].kind, tests[i].message, tests[i].offset = "limit", "nesting exceeds safety limit", -1
+	}
+	runQueryErrorCases(t, tests)
 }

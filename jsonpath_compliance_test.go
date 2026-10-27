@@ -79,7 +79,7 @@ func TestCompliance(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compile %q: %v", tc.Selector, err)
 			}
-			doc, err := jsonpath.Parse(tc.Document)
+			doc, err := jsonpath.ParseDocument(tc.Document)
 			if err != nil {
 				t.Fatal(err)
 			}
