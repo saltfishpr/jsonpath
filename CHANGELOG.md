@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/saltfishpr/jsonpath/compare/v0.4.0...v0.4.1) (2026-10-29)
+
+
+### Performance Improvements
+
+* **document:** precompute decimal magnitude for number comparisons ([c6f6b55](https://github.com/saltfishpr/jsonpath/commit/c6f6b553d8170477f63f86da1500c0b1bf9bb187))
+
 ## [0.4.0](https://github.com/saltfishpr/jsonpath/compare/v0.3.0...v0.4.0) (2026-10-27)
 
 
