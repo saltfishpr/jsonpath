@@ -26,17 +26,17 @@ func Parse(data []byte) (*Node, error) {
 	return ParseWithDepth(data, DefaultMaxDepth)
 }
 
+// ParseString 解析字符串中的 JSON 值并返回根节点。
 func ParseString(s string) (*Node, error) {
 	return Parse([]byte(s))
 }
 
-// ParseWithDepth 允许自定义最大嵌套层数；maxDepth <= 0 时使用 DefaultMaxDepth。
+// ParseWithDepth 解析 JSON 值；maxDepth <= 0 时使用 DefaultMaxDepth。
 func ParseWithDepth(data []byte, maxDepth int) (*Node, error) {
 	if maxDepth <= 0 {
 		maxDepth = DefaultMaxDepth
 	}
-	// RFC 8259 §8.1 禁止在 JSON 文本前添加 U+FEFF（BOM）。实现可选择忽略，
-	// 本包为了与 I-JSON / RFC 7493 一致，显式拒绝；BOM 为 EF BB BF 三字节。
+	// 按 I-JSON / RFC 7493 拒绝 BOM，而不是忽略它。
 	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
 		return nil, &SyntaxError{Offset: 0, Message: "unexpected byte order mark (U+FEFF)"}
 	}
@@ -167,7 +167,7 @@ func (p *parser) parseValue(depth int) (node *Node, err error) {
 	return nil, p.errf("unexpected character %q", p.src[p.pos])
 }
 
-// 不再复用全局单例，因为节点需要携带各自的 parent/index/name。
+// 每个节点需要独立的位置信息，不能复用单例。
 func (p *parser) parseLiteral(lit string, kind Kind, b bool) (*Node, error) {
 	if p.pos+len(lit) > len(p.src) || string(p.src[p.pos:p.pos+len(lit)]) != lit {
 		return nil, p.errf("invalid literal, expected %q", lit)
@@ -182,7 +182,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 	if depth > p.maxDepth {
 		return nil, p.errf("exceeded max nesting depth %d", p.maxDepth)
 	}
-	p.pos++ // consume '{'
+	p.pos++
 	p.skipWS()
 	if p.pos < len(p.src) && p.src[p.pos] == '}' {
 		p.pos++
@@ -195,14 +195,12 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 		if p.pos >= len(p.src) || p.src[p.pos] != '"' {
 			return nil, p.errf("expected string key in object")
 		}
-		// 记录键开始的字节偏移，若后续发现重复，用它定位报错位置。
 		keyPos := p.pos
 		key, err := p.parseString()
 		if err != nil {
 			return nil, err
 		}
-		// RFC 8259 建议对象名唯一，I-JSON / RFC 7493 要求 MUST unique；
-		// 本包与之一致，显式拒绝重复键，避免查询语义不确定。
+		// 按 I-JSON / RFC 7493 拒绝重复键，避免查询语义不确定。
 		if _, dup := memberIndex[key]; dup {
 			return nil, &SyntaxError{Offset: keyPos, Message: fmt.Sprintf("duplicate object member %q", key)}
 		}
@@ -246,7 +244,7 @@ func (p *parser) parseArray(depth int) (*Node, error) {
 	if depth > p.maxDepth {
 		return nil, p.errf("exceeded max nesting depth %d", p.maxDepth)
 	}
-	p.pos++ // consume '['
+	p.pos++
 	p.skipWS()
 	if p.pos < len(p.src) && p.src[p.pos] == ']' {
 		p.pos++
@@ -303,8 +301,7 @@ func (p *parser) parseString() (string, error) {
 		}
 		if c == '\\' {
 			hasEscape = true
-			// 粗跳转义：细节在 unescape 中按合法性再次扫描。
-			// 至少跳过反斜杠自己；避免把 \" 误判成字符串结束。
+			// 跳过转义字符，避免把 \" 误判为字符串结束；unescape 再校验转义。
 			if i+1 >= len(p.src) {
 				p.pos = i
 				return "", p.errf("unterminated escape at end of input")
@@ -451,11 +448,7 @@ func hex4(b []byte) (rune, bool) {
 	return r, true
 }
 
-// parseNumber 严格按 RFC 8259 的 number 文法扫描：
-//
-//	number = [ minus ] int [ frac ] [ exp ]
-//
-// 校验数字文法后缓存精确数值，原文区间由 parseValue 保留。
+// parseNumber 按 RFC 8259 校验数字并解析精确数值。
 func (p *parser) parseNumber() (*Node, error) {
 	start := p.pos
 	i := p.pos

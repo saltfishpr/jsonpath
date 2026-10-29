@@ -2,56 +2,69 @@
 // 查询和表达式节点保留源码位置，供编译器报告错误。
 package ast
 
+// Pos 表示源码位置。
 type Pos struct {
 	Offset int // 从 0 开始的字节偏移
 	Line   int // 从 1 开始的行号
 	Col    int // 从 1 开始的列号，按 rune 计数
 }
 
+// Query 表示根查询或当前节点查询。
 type Query struct {
 	IsRoot   bool // true 表示根查询（$），false 表示当前节点查询（@）
 	Segments []Segment
 	Pos      Pos
 }
 
+// SegmentKind 表示查询段的种类。
 type SegmentKind uint8
 
 const (
+	// SegChild 选择子节点。
 	SegChild SegmentKind = iota
+	// SegDescendant 选择后代节点。
 	SegDescendant
 )
 
+// Segment 表示包含一个或多个选择器的查询段。
 type Segment struct {
 	Kind      SegmentKind
 	Selectors []Selector // 至少一个
 	Pos       Pos
 }
 
+// Selector 表示查询段中的选择器。
 type Selector interface {
 	selectorNode()
+	// Position 返回选择器的源码位置。
 	Position() Pos
 }
 
+// NameSelector 按成员名选择节点。
 type NameSelector struct {
 	Name string // 解码后的 UTF-8 字符串
 	Raw  string // 原文（含引号或点号后的 member-name-shorthand）
 	Pos  Pos
 }
 
+// WildcardSelector 选择所有子节点。
 type WildcardSelector struct {
 	Pos Pos
 }
 
+// IndexSelector 按数组下标选择节点。
 type IndexSelector struct {
 	Index int64
 	Pos   Pos
 }
 
+// SliceSelector 按切片范围选择数组元素；nil 表示省略对应参数。
 type SliceSelector struct {
 	Start, End, Step *int64
 	Pos              Pos
 }
 
+// FilterSelector 按逻辑表达式筛选子节点。
 type FilterSelector struct {
 	Expr LogicalExpr
 	Pos  Pos
@@ -94,9 +107,12 @@ func (t ExprType) String() string {
 	return "unknown"
 }
 
+// Expr 表示 filter 中的表达式。
 type Expr interface {
 	exprNode()
+	// Type 返回表达式的类型。
 	Type() ExprType
+	// Position 返回表达式的源码位置。
 	Position() Pos
 }
 
@@ -113,16 +129,19 @@ type Comparable interface {
 	comparable()
 }
 
+// OrExpr 表示逻辑或表达式。
 type OrExpr struct {
 	Operands []LogicalExpr // 长度 >= 2
 	Pos      Pos
 }
 
+// AndExpr 表示逻辑与表达式。
 type AndExpr struct {
 	Operands []LogicalExpr // 长度 >= 2
 	Pos      Pos
 }
 
+// NotExpr 表示逻辑非表达式。
 type NotExpr struct {
 	Operand LogicalExpr
 	Pos     Pos
@@ -134,21 +153,29 @@ type ParenExpr struct {
 	Pos   Pos
 }
 
+// ComparisonExpr 表示比较表达式。
 type ComparisonExpr struct {
 	Op          CmpOp
 	Left, Right Comparable
 	Pos         Pos
 }
 
+// CmpOp 表示比较运算符。
 type CmpOp uint8
 
 const (
-	CmpEq CmpOp = iota // ==
-	CmpNe              // !=
-	CmpLt              // <
-	CmpLe              // <=
-	CmpGt              // >
-	CmpGe              // >=
+	// CmpEq 表示 ==。
+	CmpEq CmpOp = iota
+	// CmpNe 表示 !=。
+	CmpNe
+	// CmpLt 表示 <。
+	CmpLt
+	// CmpLe 表示 <=。
+	CmpLe
+	// CmpGt 表示 >。
+	CmpGt
+	// CmpGe 表示 >=。
+	CmpGe
 )
 
 // String returns the comparison operator's source spelling.
@@ -205,16 +232,23 @@ func (*ParenExpr) logicalExpr()      {}
 func (*ComparisonExpr) logicalExpr() {}
 func (*TestExpr) logicalExpr()       {}
 
+// LiteralKind 表示字面量的种类。
 type LiteralKind uint8
 
 const (
+	// LitString 表示字符串字面量。
 	LitString LiteralKind = iota
+	// LitInt 表示整数字面量。
 	LitInt
+	// LitFloat 表示带小数或指数的数字字面量。
 	LitFloat
+	// LitBool 表示布尔字面量。
 	LitBool
+	// LitNull 表示 null 字面量。
 	LitNull
 )
 
+// LiteralValue 保存字面量的值和原文。
 type LiteralValue struct {
 	Kind LiteralKind
 	Str  string
@@ -222,6 +256,7 @@ type LiteralValue struct {
 	Raw  string
 }
 
+// Literal 表示字面量表达式。
 type Literal struct {
 	Value LiteralValue
 	Pos   Pos
@@ -242,6 +277,7 @@ type SingularSegment struct {
 	Pos   Pos
 }
 
+// FunctionCall 表示函数调用。
 type FunctionCall struct {
 	Name string
 	Args []Expr
@@ -249,6 +285,7 @@ type FunctionCall struct {
 	Pos  Pos
 }
 
+// FilterQuery 表示 filter 中返回节点列表的查询。
 type FilterQuery struct {
 	Query *Query
 	Pos   Pos
@@ -259,8 +296,11 @@ func (*SingularQuery) exprNode() {}
 func (*FunctionCall) exprNode()  {}
 func (*FilterQuery) exprNode()   {}
 
-func (*Literal) Type() ExprType        { return TypeValue }
-func (*SingularQuery) Type() ExprType  { return TypeValue } // 用作 Comparable 时按 ValueType 对待
+func (*Literal) Type() ExprType { return TypeValue }
+
+// Type 返回 ValueType；单节点查询作为比较操作数时按此类型处理。
+func (*SingularQuery) Type() ExprType { return TypeValue }
+
 func (f *FunctionCall) Type() ExprType { return f.Ret }
 func (*FilterQuery) Type() ExprType    { return TypeNodes }
 

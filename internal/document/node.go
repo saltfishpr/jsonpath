@@ -33,48 +33,52 @@ func (k Kind) String() string {
 	return "unknown"
 }
 
-// Member 是对象的一条键值对；Name 已解码，Value 带有用于重建路径的父节点信息。
+// Member 是对象的一条键值对；Name 是解码后的成员名。
 type Member struct {
 	Name  string
 	Value *Node
 }
 
 // Node 是只读 JSON 值；解析完成后可安全地并发复用。
-//
-// parent、index 和 name 保存节点位置，用于重建 RFC 9535 Normalized Path：根节点没有
-// parent；对象成员保存父对象和键名；数组元素保存父数组和下标。
-//
-// 每个节点都需要独立的 parent 链，因此 null、true 和 false 节点也不共享单例。
 type Node struct {
 	kind    Kind
-	boolean bool     // KindBool
-	raw     []byte   // 保留原始输入中的片段，供查询结果直接引用
-	number  Number   // KindNumber: 构造时解析，之后只读
-	str     string   // KindString: 已解码的 UTF-8
-	arr     []*Node  // KindArray
-	members []Member // KindObject，按出现顺序存储
+	boolean bool
+	raw     []byte
+	number  Number
+	str     string
+	arr     []*Node
+	members []Member // 按输入顺序存储
 
-	memberIndex map[string]*Node // 对象在解析阶段构建，之后只读
+	memberIndex map[string]*Node
 
 	parent *Node  // 所属容器；根节点为 nil
 	index  int64  // 在父数组中的下标；非数组元素为 -1
 	name   string // 在父对象中的键名；非对象成员为空字符串
 }
 
-func NewNull() *Node  { return &Node{kind: KindNull, index: -1} }
-func NewTrue() *Node  { return &Node{kind: KindBool, boolean: true, index: -1} }
+// NewNull 创建 null 节点。
+func NewNull() *Node { return &Node{kind: KindNull, index: -1} }
+
+// NewTrue 创建 true 节点。
+func NewTrue() *Node { return &Node{kind: KindBool, boolean: true, index: -1} }
+
+// NewFalse 创建 false 节点。
 func NewFalse() *Node { return &Node{kind: KindBool, boolean: false, index: -1} }
 
+// NewNumber 根据已校验的 JSON 数字文本创建节点。
 func NewNumber(number string) *Node {
 	return &Node{kind: KindNumber, number: ParseNumber(number), index: -1}
 }
 
+// NewString 创建字符串节点。
 func NewString(s string) *Node {
 	return &Node{kind: KindString, str: s, index: -1}
 }
 
+// Kind 返回节点的种类。
 func (n *Node) Kind() Kind { return n.kind }
 
+// IsNull 报告节点是否为 JSON null；nil 节点返回 false。
 func (n *Node) IsNull() bool { return n != nil && n.kind == KindNull }
 
 // Raw 返回与输入共享内存的 JSON 原文，调用方不得修改；手工构造的节点返回 nil。
@@ -97,7 +101,6 @@ func (n *Node) Array() []*Node { return n.arr }
 func (n *Node) Members() []Member { return n.members }
 
 // Len 返回数组元素数、对象成员数或字符串的 Unicode 码点数；其余种类返回 -1。
-// 字符串按码点计数，与 RFC 9535 的 length() 语义一致。
 func (n *Node) Len() int {
 	if n == nil {
 		return -1

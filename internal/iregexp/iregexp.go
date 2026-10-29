@@ -1,13 +1,5 @@
 // Package iregexp implements the I-Regexp dialect defined in RFC 9485
-// (and referenced by RFC 9535 §2.3.3 for JSONPath regular expression
-// matching). It exposes two matching semantics:
-//
-//   - (*Regexp).Match  — RFC 9485 §4 full-string match.
-//   - (*Regexp).Search — any-substring match.
-//
-// Internally an I-Regexp pattern is validated against the ABNF in
-// RFC 9485 §2 and translated to an equivalent Go `regexp` (RE2)
-// pattern, then compiled.
+// with full-string and substring matching.
 package iregexp
 
 import (
@@ -48,7 +40,7 @@ func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("iregexp: at offset %d: %s", e.Offset, e.Message)
 }
 
-// Compile parses and compiles an I-Regexp.
+// Compile compiles an I-Regexp pattern.
 // Invalid patterns return *SyntaxError; implementation limits and backend
 // failures return other errors and must not be interpreted as a failed match.
 func Compile(pattern string) (*Regexp, error) {
@@ -69,6 +61,7 @@ func Compile(pattern string) (*Regexp, error) {
 	return &Regexp{src: pattern, literal: literal, isLiteral: complete, search: search, match: match}, nil
 }
 
+// MustCompile compiles pattern and panics if compilation fails.
 func MustCompile(pattern string) *Regexp {
 	r, err := Compile(pattern)
 	if err != nil {
@@ -95,22 +88,17 @@ func (r *Regexp) Search(s string) bool {
 	return r.search.MatchString(s)
 }
 
+// String returns the original pattern.
 func (r *Regexp) String() string { return r.src }
 
-// Translator / validator
-//
-// Parsing functions write their RE2 fragments to one Builder so nested
-// groups do not repeatedly copy the same text. They return the largest
-// finite repeat-count product Go's regexp/syntax.repeatIsValid would observe
-// from the fragment's root. Keeping this weight ≤ reWeightLimit guarantees
-// Go accepts every repeat we emit; larger repeats are unrolled instead.
+// Parsing functions share a Builder to avoid copying nested groups. They return
+// the maximum finite repeat-count product checked by Go's regexp/syntax;
+// repetitions exceeding reWeightLimit are unrolled.
 
 const (
 	// Go's regexp/syntax enforces a per-expansion limit of 1000.
 	reWeightLimit = 1000
-	// Hard cap on the translated pattern size, to bound unrolling of
-	// pathologically large I-Regexp inputs. ~8 MiB is plenty for any
-	// realistic use yet still bounded.
+	// Bound the output size when unrolling large repetitions.
 	maxTranslatedBytes = 8 << 20
 	// Bound recursive parsing independently of the translated output size.
 	maxNestingDepth = 128
@@ -322,16 +310,8 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 		return effective * atomWeight, t.write(suffix + "}")
 	}
 
-	// Slow path: unroll. Writing (atomText){k} as atomText·k·times
-	// concatenations keeps every surviving {…} ≤ limit (because atom
-	// was translated under the same rule, so atomWeight ≤ limit) and
-	// avoids any new {n} on this node.
-	//
-	// Compute the output size with saturating uint64 arithmetic so a
-	// user-supplied value like {9223372036854775807} cannot overflow
-	// an `int` and sneak past the size guard — which would then make
-	// strings.Builder.Grow panic with "negative count".
-	// Builder.String keeps this atom valid even if later appends grow the buffer.
+	// Unroll repetitions that exceed Go's limit. Saturating arithmetic keeps
+	// large counts from overflowing the size check and causing Grow to panic.
 	atomText := t.out.String()[atomStart:]
 	atomLen := uint64(len(atomText))
 	remaining := n - 1
@@ -353,7 +333,6 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 		return 0, ErrPatternTooLarge
 	}
 
-	// The whole expansion, including the existing prefix, has been checked.
 	t.out.Grow(int(extra))
 	if n == 0 {
 		t.out.WriteByte('?')

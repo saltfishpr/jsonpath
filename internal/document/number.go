@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Number 用有效数字和十进制指数表示精确数值，避免浮点数的溢出与精度损失。
+// Number 表示精确的 JSON 数值，避免浮点数的溢出与精度损失。
 type Number struct {
 	digits      string
 	exponent    int64
@@ -15,7 +15,7 @@ type Number struct {
 	negative    bool
 }
 
-// ParseNumber 只接收已经由 JSON decoder 或 JSONPath lexer 校验的数字文本。
+// ParseNumber 解析已校验的 JSON 数字文本。
 func ParseNumber(s string) Number {
 	var n Number
 	if s[0] == '-' {
@@ -68,6 +68,7 @@ func ParseNumber(s string) Number {
 	return n
 }
 
+// Cmp 比较两个数值，分别在小于、等于或大于 other 时返回 -1、0 或 1。
 func (n Number) Cmp(other Number) int {
 	if n.negative != other.negative {
 		if n.negative {

@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// mustParse 解析 src，失败时终止测试。节点与传入字节的副本共享内存，
-// 因此测试不要依赖解析后修改原字符串。
 func mustParse(t testing.TB, src string) *Node {
 	t.Helper()
 	n, err := Parse([]byte(src))
@@ -296,8 +294,7 @@ func TestParseContainerStructure(t *testing.T) {
 	}
 }
 
-// TestParseNodeInvariants 校验解析器 arena 的节点指针唯一性，以及 parent/index/name
-// 与 raw 区间的一致性；这些不变量由 Node 复用与字符串块共享直接决定。
+// TestParseNodeInvariants 校验节点指针唯一性、位置信息和 raw 区间。
 func TestParseNodeInvariants(t *testing.T) {
 	const items = 1000
 	var sb strings.Builder
@@ -366,8 +363,6 @@ func TestParseNodeInvariants(t *testing.T) {
 	}
 }
 
-// TestParseStringsAfterBlockSwitch 覆盖字符串块写满后换块：较早返回的字符串
-// 仍必须保持原值。
 func TestParseStringsAfterBlockSwitch(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteByte('[')
@@ -593,7 +588,6 @@ func TestParseMaxDepth(t *testing.T) {
 		t.Errorf("message = %q, want contains %q", syntaxErr.Message, want)
 	}
 
-	// maxDepth <= 0 时退回 DefaultMaxDepth。
 	if _, err := ParseWithDepth([]byte("[]"), 0); err != nil {
 		t.Fatalf("ParseWithDepth(max=0): %v", err)
 	}
@@ -658,7 +652,6 @@ func TestParseRawAliasesInput(t *testing.T) {
 	}
 }
 
-// TestParseDoesNotModifyInput 保证解析过程只读输入。
 func TestParseDoesNotModifyInput(t *testing.T) {
 	const src = ` {"a":[1,"\\u4e2d",null],"b":{}} `
 	data := []byte(src)
