@@ -89,6 +89,8 @@ func runQueryCases(t *testing.T, tests []queryCase) {
 	t.Run("QueryNodes", func(t *testing.T) { runQueryNodesCases(t, tests) })
 }
 
+// TestQuerySelection checks selection order, duplicate retention, and exact source
+// preservation through both public result formats.
 func TestQuerySelection(t *testing.T) {
 	runQueryCases(t, []queryCase{
 		{
@@ -163,6 +165,8 @@ func TestQuerySelection(t *testing.T) {
 	}
 }
 
+// TestQueryNormalizedPaths checks canonical escaping and paths deeper than the
+// initial ancestor buffer.
 func TestQueryNormalizedPaths(t *testing.T) {
 	const depth = 40
 	runQueryCases(t, []queryCase{
@@ -180,6 +184,8 @@ func TestQueryNormalizedPaths(t *testing.T) {
 	})
 }
 
+// TestQueryFunctions exercises builtin type conversions, missing values, and
+// constant and runtime pattern handling through the public API.
 func TestQueryFunctions(t *testing.T) {
 	runQueryCases(t, []queryCase{
 		{
@@ -238,6 +244,8 @@ func TestQueryFunctions(t *testing.T) {
 	})
 }
 
+// TestQueryExactNumberComparison covers precision and exponent boundaries that
+// floating-point conversion would lose, plus structural and missing-value equality.
 func TestQueryExactNumberComparison(t *testing.T) {
 	tests := []struct {
 		name, left, op, right string
@@ -292,6 +300,8 @@ func TestQueryExactNumberComparison(t *testing.T) {
 	})
 }
 
+// TestQueryRegexp checks I-Regexp semantics that differ from Go regexp, including
+// valid repetitions beyond backend limits and invalid patterns that must yield false.
 func TestQueryRegexp(t *testing.T) {
 	tests := []struct {
 		name, pattern, text string
@@ -352,6 +362,8 @@ func TestQueryRegexp(t *testing.T) {
 	}
 }
 
+// TestQueryResultSharesInput checks byte identity as well as content so an
+// accidental copy cannot satisfy the source-aliasing contract.
 func TestQueryResultSharesInput(t *testing.T) {
 	data := []byte(`{"v": [ 1.00, "\u4e2d" ]}`)
 	want := []byte(`[ 1.00, "\u4e2d" ]`)
@@ -377,7 +389,7 @@ func TestQueryResultSharesInput(t *testing.T) {
 
 type queryErrorCase struct {
 	name, expr, data, kind, message string
-	offset                          int // -1 表示只检查错误类型和消息。
+	offset                          int // Negative values disable only the location assertion.
 }
 
 func runQueryErrorCases(t *testing.T, tests []queryErrorCase) {
@@ -443,6 +455,8 @@ func runQueryErrorCases(t *testing.T, tests []queryErrorCase) {
 	}
 }
 
+// TestQueryCompileErrors checks error types, byte offsets, and diagnostic
+// precedence when more than one part of a request is invalid.
 func TestQueryCompileErrors(t *testing.T) {
 	runQueryErrorCases(t, []queryErrorCase{
 		{name: "empty query", expr: "", data: `null`, kind: "compile", message: "compile error at offset 0", offset: 0},
@@ -465,6 +479,7 @@ func TestQueryCompileErrors(t *testing.T) {
 	})
 }
 
+// TestQuerySyntaxErrors rejects malformed expressions before document evaluation.
 func TestQuerySyntaxErrors(t *testing.T) {
 	tests := []struct{ name, expr string }{
 		{"token after root", "$@"},
@@ -499,6 +514,8 @@ func TestQuerySyntaxErrors(t *testing.T) {
 	runQueryErrorCases(t, cases)
 }
 
+// TestQueryDocumentErrors checks that parser failures retain their input byte
+// offsets when exposed as public [jsonpath.DocumentError] values.
 func TestQueryDocumentErrors(t *testing.T) {
 	tests := []queryErrorCase{
 		{name: "empty document", data: "", message: "unexpected end", offset: 0},
@@ -542,6 +559,8 @@ func TestQueryDocumentErrors(t *testing.T) {
 	runQueryErrorCases(t, tests)
 }
 
+// TestQueryRegexpLimits checks that resource failures propagate through nested
+// evaluation without becoming syntax errors, false matches, or partial results.
 func TestQueryRegexpLimits(t *testing.T) {
 	patterns := []struct{ name, pattern, message string }{
 		{"nesting", strings.Repeat("(", 129) + "a" + strings.Repeat(")", 129), "nesting exceeds safety limit"},

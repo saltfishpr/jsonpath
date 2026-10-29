@@ -1,5 +1,7 @@
-// Package iregexp implements the I-Regexp dialect defined in RFC 9485
-// with full-string and substring matching.
+// Package iregexp provides RFC 9485 I-Regexp matching for JSONPath functions.
+// Patterns are translated to Go regular expressions. Syntax errors are distinct
+// from implementation limits so callers can treat invalid patterns as false
+// without hiding failures to process valid patterns.
 package iregexp
 
 import (
@@ -11,38 +13,42 @@ import (
 	"unicode/utf8"
 )
 
-// Regexp 保存已编译的 I-Regexp，可并发用于全匹配和子串匹配。
+// Regexp is a compiled pattern safe for concurrent [Regexp.Match] and [Regexp.Search] calls.
+// Create it with [Compile] or [MustCompile]; the zero value is not usable.
+// Matching treats each invalid UTF-8 byte in the input as U+FFFD, as Go regexp does.
 type Regexp struct {
 	src       string
 	literal   string
 	isLiteral bool
-	search    *regexp.Regexp // unanchored (for Search)
-	match     *regexp.Regexp // anchored with \A ... \z (for Match)
+	search    *regexp.Regexp
+	match     *regexp.Regexp
 }
 
-// ErrPatternTooLarge is returned when translation exceeds the safety limit.
-// I-Regexp permits unbounded repetition, so the limit bounds pattern expansion.
+// ErrPatternTooLarge means translating a pattern would exceed the output size
+// limit. It does not imply invalid I-Regexp syntax.
 var ErrPatternTooLarge = errors.New("iregexp: translated pattern exceeds safety limit")
 
-// ErrNestingTooDeep is returned by Compile when a pattern nests more than
-// 128 groups. This implementation limit bounds the recursive parser's stack.
+// ErrNestingTooDeep identifies the implementation limit of 128 nested groups.
+// [Compile] wraps this error with the source position; use [errors.Is] to detect it.
 var ErrNestingTooDeep = errors.New("iregexp: pattern nesting exceeds safety limit")
 
-// SyntaxError reports an invalid I-Regexp pattern. Callers can use errors.As
-// to distinguish invalid patterns from implementation limits and backend errors.
+// SyntaxError reports a violation of I-Regexp grammar. Use [errors.As] to
+// distinguish it from resource limits and failures in the regexp backend.
 type SyntaxError struct {
-	// Offset is the zero-based byte offset within the pattern.
-	Offset  int
+	// Offset is the zero-based byte position at which validation failed.
+	Offset int
+	// Message describes the failure without a location prefix.
 	Message string
 }
 
+// Error returns the diagnostic with its byte offset in the pattern.
 func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("iregexp: at offset %d: %s", e.Offset, e.Message)
 }
 
-// Compile compiles an I-Regexp pattern.
-// Invalid patterns return *SyntaxError; implementation limits and backend
-// failures return other errors and must not be interpreted as a failed match.
+// Compile prepares pattern for whole-string and substring matching.
+// Grammar violations return *[SyntaxError]; size, nesting, numeric conversion,
+// and backend failures return other errors. Any error returns a nil [Regexp].
 func Compile(pattern string) (*Regexp, error) {
 	t := &translator{src: pattern}
 	translated, err := t.translate()
@@ -61,7 +67,8 @@ func Compile(pattern string) (*Regexp, error) {
 	return &Regexp{src: pattern, literal: literal, isLiteral: complete, search: search, match: match}, nil
 }
 
-// MustCompile compiles pattern and panics if compilation fails.
+// MustCompile returns [Compile]'s result or panics with its error. It is intended
+// for patterns whose validity is established before runtime.
 func MustCompile(pattern string) *Regexp {
 	r, err := Compile(pattern)
 	if err != nil {
@@ -70,17 +77,19 @@ func MustCompile(pattern string) *Regexp {
 	return r
 }
 
-// Match reports whether s matches the regexp according to the
-// RFC 9485 §4 semantics (boolean full-string match).
+// Match reports whether the pattern matches all of s, including any newlines.
+// The I-Regexp dot excludes carriage return and line feed.
 func (r *Regexp) Match(s string) bool {
-	// 非法 UTF-8 必须保留 regexp 将其视作 RuneError 的语义。
+	// Byte equality is equivalent only for valid UTF-8; otherwise the backend
+	// must interpret malformed bytes as replacement characters.
 	if r.isLiteral && utf8.ValidString(s) {
 		return s == r.literal
 	}
 	return r.match.MatchString(s)
 }
 
-// Search reports whether any substring of s matches the regexp.
+// Search reports whether the pattern matches any substring of s, including an
+// empty substring when the pattern permits one.
 func (r *Regexp) Search(s string) bool {
 	if r.isLiteral && utf8.ValidString(s) {
 		return strings.Contains(s, r.literal)
@@ -88,22 +97,21 @@ func (r *Regexp) Search(s string) bool {
 	return r.search.MatchString(s)
 }
 
-// String returns the original pattern.
+// String returns the pattern supplied to [Compile], without translation or normalization.
 func (r *Regexp) String() string { return r.src }
 
-// Parsing functions share a Builder to avoid copying nested groups. They return
-// the maximum finite repeat-count product checked by Go's regexp/syntax;
-// repetitions exceeding reWeightLimit are unrolled.
-
 const (
-	// Go's regexp/syntax enforces a per-expansion limit of 1000.
+	// Go limits the product of nested finite repetition counts, not just each count.
 	reWeightLimit = 1000
-	// Bound the output size when unrolling large repetitions.
+	// Expansion must remain bounded even when an I-Regexp repeat count is valid.
 	maxTranslatedBytes = 8 << 20
-	// Bound recursive parsing independently of the translated output size.
+	// Small translated output can still require excessive parser recursion.
 	maxNestingDepth = 128
 )
 
+// Parsing appends to a shared builder and returns the largest nested finite
+// repeat product. Tracking that weight allows valid I-Regexp repetitions to be
+// expanded when Go's regexp parser cannot accept their counted form.
 type translator struct {
 	src   string
 	pos   int
@@ -160,7 +168,6 @@ func (t *translator) translate() (string, error) {
 	return t.out.String(), nil
 }
 
-// regexp = branch *( "|" branch )
 func (t *translator) regexp() (int, error) {
 	weight, err := t.branch()
 	if err != nil {
@@ -186,7 +193,6 @@ func (t *translator) regexp() (int, error) {
 	return weight, nil
 }
 
-// branch = *piece
 func (t *translator) branch() (int, error) {
 	weight := 1
 	for {
@@ -204,7 +210,6 @@ func (t *translator) branch() (int, error) {
 	}
 }
 
-// piece = atom [ quantifier ]
 func (t *translator) piece() (int, error) {
 	atomStart := t.out.Len()
 	atomWeight, err := t.atom()
@@ -218,7 +223,7 @@ func (t *translator) piece() (int, error) {
 	switch r {
 	case '?', '*', '+':
 		t.advance()
-		// These quantifiers do not increase Go's finite repeat weight.
+		// Go's repeat-product check passes through these operators unchanged.
 		return atomWeight, t.write(string(r))
 	case '{':
 		return t.braceQuantifier(atomStart, atomWeight)
@@ -226,12 +231,10 @@ func (t *translator) piece() (int, error) {
 	return atomWeight, nil
 }
 
-// braceQuantifier handles { QuantExact [ "," [ QuantExact ] ] "}".
-// It normalises leading zeros in the digit groups and transparently
-// unrolls the repetition if emitting {n,m} would push the weight above
-// Go RE2's internal limit.
+// The atom is already in out. Preserve it while choosing a counted suffix or
+// explicit copies that keep nested repetition within the backend's limit.
 func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
-	t.advance() // '{'
+	t.advance()
 	nStr, err := t.readDigits()
 	if err != nil {
 		return 0, err
@@ -269,8 +272,8 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 	}
 	t.advance()
 
-	// Validate the range before converting counts so an invalid pattern remains
-	// distinguishable from a valid count that exceeds the machine's integer range.
+	// Diagnose reversed bounds as syntax errors even when either count is too
+	// large for int. Valid but unrepresentable counts are implementation failures.
 	if !unbounded && (len(nStr) > len(mStr) || (len(nStr) == len(mStr) && nStr > mStr)) {
 		return 0, t.errf("quantifier range out of order: {%s,%s}", nStr, mStr)
 	}
@@ -286,19 +289,17 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 		}
 	}
 
-	// Determine the finite "max count" that Go's repeatIsValid would use
-	// at this node. For unbounded {n,} it uses Min (= n); for OpStar
-	// (which we never emit here) it uses 0 (transparent).
+	// For {n,}, Go checks the minimum count; for bounded repeats it checks
+	// the maximum. A zero count leaves the inner weight unchanged.
 	maxCount := m
 	if unbounded {
 		maxCount = n
 	}
 	effective := maxCount
 	if effective < 1 {
-		effective = 1 // transparent, as per Go's rule.
+		effective = 1
 	}
 
-	// Fast path: current limits already satisfy RE2.
 	if effective <= reWeightLimit/atomWeight && n <= reWeightLimit &&
 		(unbounded || m <= reWeightLimit) {
 		suffix := "{" + nStr
@@ -310,18 +311,19 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 		return effective * atomWeight, t.write(suffix + "}")
 	}
 
-	// Unroll repetitions that exceed Go's limit. Saturating arithmetic keeps
-	// large counts from overflowing the size check and causing Grow to panic.
+	// Size estimates saturate so huge counts cannot wrap below the output
+	// limit and reach Grow with an invalid allocation size.
 	atomText := t.out.String()[atomStart:]
 	atomLen := uint64(len(atomText))
 	remaining := n - 1
 	optional := m - n
 	var extra uint64
 	if n == 0 {
-		// {0,} always takes the fast path; here the first atom is optional.
+		// The emitted atom accounts for one optional copy when the minimum is
+		// zero. The unbounded {0,} case already used the counted form above.
 		remaining = 0
 		optional--
-		extra = 1 // '?' makes the existing atom the first optional copy.
+		extra = 1 // Account for the existing atom's '?' suffix.
 	}
 	extra = addSat(extra, mulSat(uint64(remaining), atomLen))
 	if unbounded {
@@ -351,13 +353,11 @@ func (t *translator) braceQuantifier(atomStart, atomWeight int) (int, error) {
 			t.out.WriteString(")?")
 		}
 	}
-	// After unrolling we have a plain concat/star — no new finite
-	// repeats surround the atom, so the overall weight collapses back
-	// to the atom's own weight.
+	// Concatenation and optional/star wrappers add no finite repeat weight.
 	return atomWeight, nil
 }
 
-// mulSat returns a*b, saturated to math.MaxUint64 on overflow.
+// Saturation preserves an over-budget estimate when multiplication overflows.
 func mulSat(a, b uint64) uint64 {
 	if a == 0 || b == 0 {
 		return 0
@@ -368,7 +368,7 @@ func mulSat(a, b uint64) uint64 {
 	return a * b
 }
 
-// addSat returns a+b, saturated to math.MaxUint64 on overflow.
+// Saturation preserves an over-budget estimate when addition overflows.
 func addSat(a, b uint64) uint64 {
 	s := a + b
 	if s < a {
@@ -390,7 +390,7 @@ func (t *translator) readDigits() (string, error) {
 }
 
 func normalizeCount(s string) string {
-	// Canonical digits allow range comparison without expanding large integers.
+	// Strip redundant zeros so length and lexical order compare arbitrary counts.
 	i := 0
 	for i < len(s)-1 && s[i] == '0' {
 		i++
@@ -398,7 +398,6 @@ func normalizeCount(s string) string {
 	return s[i:]
 }
 
-// atom = NormalChar / charClass / ( "(" regexp ")" )
 func (t *translator) atom() (int, error) {
 	r, _, ok := t.peek()
 	if !ok {
@@ -427,7 +426,7 @@ func (t *translator) atom() (int, error) {
 		return w, t.write(")")
 	case '.':
 		t.advance()
-		// RFC 9485 §4: '.' matches any character except CR / LF.
+		// Go's default dot excludes LF only; I-Regexp also excludes CR.
 		return 1, t.write(`[^\n\r]`)
 	case '\\':
 		s, err := t.escape()
@@ -445,6 +444,7 @@ func (t *translator) atom() (int, error) {
 	}
 }
 
+// I-Regexp treats ^ and $ as ordinary characters outside character classes.
 func literalString(r rune) string {
 	switch r {
 	case '\\', '.', '+', '*', '?', '(', ')', '|', '[', ']', '{', '}',
@@ -455,7 +455,7 @@ func literalString(r rune) string {
 }
 
 func (t *translator) escape() (string, error) {
-	t.advance() // '\'
+	t.advance()
 	r, _, ok := t.peek()
 	if !ok {
 		return "", t.errf("dangling backslash")
@@ -473,12 +473,12 @@ func (t *translator) escape() (string, error) {
 }
 
 func (t *translator) categoryEsc(kind rune) (string, error) {
-	t.advance() // 'p' or 'P'
+	t.advance()
 	r, _, ok := t.peek()
 	if !ok || r != '{' {
 		return "", t.errf("expected '{' after \\%c", kind)
 	}
-	t.advance() // '{'
+	t.advance()
 	propStart := t.pos
 	for {
 		r2, _, ok := t.peek()
@@ -494,13 +494,14 @@ func (t *translator) categoryEsc(kind rune) (string, error) {
 	if !isValidIsCategory(propName) {
 		return "", t.errf("invalid IsCategory %q", propName)
 	}
-	t.advance() // '}'
+	t.advance()
 	return "\\" + string(kind) + "{" + propName + "}", nil
 }
 
-// charClassExpr = "[" [ "^" ] ( "-" / CCE1 ) *CCE1 [ "-" ] "]"
+// A bare hyphen is literal only at a class boundary; internal hyphens must
+// belong to a range. This context cannot be delegated to Go's class parser.
 func (t *translator) charClassExpr() error {
-	t.advance() // '['
+	t.advance()
 	if err := t.write("["); err != nil {
 		return err
 	}
@@ -554,9 +555,8 @@ func (t *translator) charClassExpr() error {
 	}
 }
 
-// CCE1 = ( CCchar [ "-" CCchar ] ) / charClassEsc
-//
-// Per RFC 9485 §3, CCchar excludes '\', ']', '-' AND '['.
+// A class item is either a category escape or a single character with an
+// optional range endpoint. Escaped punctuation counts as a single character.
 func (t *translator) cce1() (string, error) {
 	r, _, ok := t.peek()
 	if !ok {
@@ -569,13 +569,13 @@ func (t *translator) cce1() (string, error) {
 			return "", t.errf("dangling backslash")
 		}
 		if next == 'p' || next == 'P' {
-			t.advance() // '\'
+			t.advance()
 			s, err := t.categoryEsc(next)
 			if err != nil {
 				return "", err
 			}
-			// \p/\P cannot form a range endpoint; a following '-X'
-			// is therefore illegal.
+			// A category denotes a set, so it cannot start a range. A trailing
+			// literal hyphen remains valid.
 			if r2, _, ok := t.peek(); ok && r2 == '-' {
 				if nx, ok := t.peekAt(1); ok && nx != ']' {
 					return "", t.errf(`\p/\P cannot be a range endpoint`)
@@ -606,7 +606,7 @@ func (t *translator) cce1() (string, error) {
 }
 
 func (t *translator) classSingleCharEsc() (rune, error) {
-	t.advance() // '\'
+	t.advance()
 	r, _, ok := t.peek()
 	if !ok {
 		return 0, t.errf("dangling backslash")
@@ -635,9 +635,9 @@ func (t *translator) maybeRangeTail(lower rune) (string, error) {
 		return "", nil
 	}
 	if next, ok := t.peekAt(1); ok && next == ']' {
-		return "", nil // trailing literal '-' handled by caller
+		return "", nil // Leave a boundary hyphen for charClassExpr to emit literally.
 	}
-	t.advance() // '-'
+	t.advance()
 	r2, _, ok := t.peek()
 	if !ok {
 		return "", t.errf("unterminated character class")
@@ -661,7 +661,8 @@ func (t *translator) maybeRangeTail(lower rune) (string, error) {
 		}
 		t.advance()
 	}
-	// Range validity belongs to I-Regexp validation, not backend error handling.
+	// Report reversed endpoints as [SyntaxError] so JSONPath can yield false
+	// rather than propagating a backend compilation failure.
 	if lower > r2 {
 		return "", t.errf("character range out of order: %q-%q", lower, r2)
 	}
@@ -682,20 +683,8 @@ func classLiteral(r rune) string {
 	return string(r)
 }
 
-// ---------------------------------------------------------------------------
-// IsCategory validation (RFC 9485 §2 ABNF)
-// ---------------------------------------------------------------------------
-//
-// IsCategory  = Letters / Marks / Numbers / Punctuation / Separators /
-//               Symbols / Others
-// Letters     = "L" [ ( "l" / "m" / "o" / "t" / "u" ) ]
-// Marks       = "M" [ ( "c" / "e" / "n" ) ]
-// Numbers     = "N" [ ( "d" / "l" / "o" ) ]
-// Punctuation = "P" [ ( "c" / "d" / "e" / "f" / "i" / "o" / "s" ) ]
-// Separators  = "Z" [ ( "l" / "p" / "s" ) ]
-// Symbols     = "S" [ ( "c" / "k" / "m" / "o" ) ]
-// Others      = "C" [ ( "c" / "f" / "n" / "o" ) ]
-
+// RFC 9485 permits only these general categories and subcategories, even when
+// the backend recognizes additional Unicode property names.
 var isCategorySubs = map[byte]string{
 	'L': "lmotu",
 	'M': "cen",

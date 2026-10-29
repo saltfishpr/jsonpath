@@ -1,4 +1,6 @@
-// Package parse 将 RFC 9535 JSONPath 查询解析为 ast.Query。
+// Package parse checks JSONPath lexical and grammatical rules and builds an AST.
+// It preserves source positions but leaves function resolution and type checking
+// to the compiler.
 package parse
 
 import (
@@ -8,17 +10,22 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/ast"
 )
 
-// Error 表示带源码位置的词法或语法错误。
+// Error identifies a lexical or grammatical failure in the original query.
 type Error struct {
+	// Pos locates the token or character at which parsing failed.
 	Pos ast.Pos
+	// Msg describes the failure without a location prefix.
 	Msg string
 }
 
+// Error returns the diagnostic with a one-based line and rune column.
 func (e *Error) Error() string {
 	return fmt.Sprintf("parse error at line %d col %d: %s", e.Pos.Line, e.Pos.Col, e.Msg)
 }
 
-// Parse 将 JSONPath 查询解析为 AST。
+// Parse accepts a complete query beginning with $, without leading or trailing
+// whitespace. Invalid syntax returns an *[Error] and a nil tree. A successful
+// result still requires semantic validation of function calls and types.
 func Parse(src string) (*ast.Query, error) {
 	toks, err := lex(src)
 	if err != nil {
@@ -50,7 +57,8 @@ func (p *parser) peek() token { return p.toks[p.pos] }
 func (p *parser) advance() token {
 	t := p.peek()
 	p.pos++
-	// lexer 将连续空白合并为一个 token；保留原始列表供语法规则检查相邻关系。
+	// One token holds an entire whitespace run. Keep it in toks so callers
+	// can reject whitespace at grammar boundaries that require adjacency.
 	if p.pos < len(p.toks) && p.peek().Kind == tkWhitespace {
 		p.pos++
 	}
@@ -135,7 +143,7 @@ func (p *parser) parseDotSegment() (ast.Segment, error) {
 			Pos:       dot.Pos,
 		}, nil
 	case tkName, tkTrue, tkFalse, tkNull:
-		// true/false/null 作为 shorthand 名字也允许（它们在 bracket 外没有歧义）。
+		// Literal keywords are member names in dot notation.
 		p.advance()
 		return ast.Segment{
 			Kind:      ast.SegChild,
@@ -243,7 +251,8 @@ func (p *parser) parseIndexOrSlice() (ast.Selector, error) {
 	return &ast.IndexSelector{Index: n, Pos: tok.Pos}, nil
 }
 
-// start 已消费（也可能为 nil 表示省略），当前 token 必须是 ':'
+// The caller has consumed start, if present, and left the first colon pending.
+// Keep omitted bounds as nil because their defaults depend on step direction.
 func (p *parser) parseSlice(start *int64, pos ast.Pos) (ast.Selector, error) {
 	if _, err := p.expect(tkColon); err != nil {
 		return nil, err
@@ -471,7 +480,8 @@ func (p *parser) parsePrimary() (ast.Expr, error) {
 	return nil, p.errorf(t.Pos, "unexpected %s in expression", describe(t))
 }
 
-// parseFilterQueryOrSingular 将查询暂存为 FilterQuery，供调用方按上下文处理。
+// Preserve queries as node lists until the enclosing context establishes
+// whether a singular value or an existence test is required.
 func (p *parser) parseFilterQueryOrSingular(isRoot bool) (ast.Expr, error) {
 	rootTok := p.advance()
 	segs, err := p.parseSegments()
@@ -573,6 +583,7 @@ func (p *parser) parseFunctionArguments() ([]ast.Expr, error) {
 }
 
 func (p *parser) parseFunctionArg() (ast.Expr, error) {
-	// RFC 9535 §2.4.1: function-argument = literal / filter-query / logical-expr / function-expr.
+	// Unlike a filter condition, an argument may remain a literal or query;
+	// only explicit logical operators require conversion to [ast.LogicalExpr].
 	return p.parseOr()
 }

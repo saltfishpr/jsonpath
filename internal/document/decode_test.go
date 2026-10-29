@@ -17,6 +17,8 @@ func mustParse(t testing.TB, src string) *Node {
 	return n
 }
 
+// TestParseScalars checks decoded values, preserved source text, and location
+// defaults for standalone scalars.
 func TestParseScalars(t *testing.T) {
 	type number struct {
 		digits   string
@@ -29,7 +31,7 @@ func TestParseScalars(t *testing.T) {
 		kind    Kind
 		boolean bool
 		str     string
-		number  *number // nil 表示不校验数字表示
+		number  *number // Nil omits assertions about the internal decimal representation.
 		len     int
 	}{
 		{name: "null", src: "null", kind: KindNull, len: -1},
@@ -121,6 +123,8 @@ func TestParseScalars(t *testing.T) {
 	}
 }
 
+// TestParseBigExponent checks promotion beyond int64 and demotion when decimal
+// normalization brings an exponent back into range.
 func TestParseBigExponent(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -162,6 +166,7 @@ func TestParseBigExponent(t *testing.T) {
 	}
 }
 
+// TestNodeConstructors checks scalar payloads and independent node identity.
 func TestNodeConstructors(t *testing.T) {
 	null := NewNull()
 	if null.Kind() != KindNull || !null.IsNull() || null.Index() != -1 {
@@ -186,12 +191,15 @@ func TestNodeConstructors(t *testing.T) {
 		t.Errorf("NewString() = %+v", str)
 	}
 
-	// 布尔与 null 节点不能是共享单例：每个节点都要有独立的位置信息。
+	// Equal values may later occupy different locations, so their node identity
+	// must not be shared.
 	if tr == NewTrue() || fa == NewFalse() || null == NewNull() {
 		t.Error("构造器返回了共享单例，节点需要独立的 parent/index/name")
 	}
 }
 
+// TestParseContainerStructure checks member order, lookup identity, source
+// boundaries, and parent metadata across mixed and empty containers.
 func TestParseContainerStructure(t *testing.T) {
 	const src = `{"arr":[1,"two",null,{"k":true}],"empty":[],"emptyObj":{}}`
 	root := mustParse(t, src)
@@ -294,7 +302,8 @@ func TestParseContainerStructure(t *testing.T) {
 	}
 }
 
-// TestParseNodeInvariants 校验节点指针唯一性、位置信息和 raw 区间。
+// TestParseNodeInvariants checks that block allocation preserves unique node
+// addresses, parent links, lookup identity, and source fragments across a large tree.
 func TestParseNodeInvariants(t *testing.T) {
 	const items = 1000
 	var sb strings.Builder
@@ -310,7 +319,7 @@ func TestParseNodeInvariants(t *testing.T) {
 	root := mustParse(t, src)
 
 	seen := make(map[*Node]bool, items*5)
-	wantNodes := 1 + items*5 // 数组 + 每项「对象、数组、数字、null、字符串」
+	wantNodes := 1 + items*5 // Root array plus an object, array, number, null, and string per item.
 	var walk func(n *Node, parent *Node)
 	walk = func(n *Node, parent *Node) {
 		t.Helper()
@@ -363,6 +372,8 @@ func TestParseNodeInvariants(t *testing.T) {
 	}
 }
 
+// TestParseStringsAfterBlockSwitch checks that allocating later string blocks
+// cannot overwrite text retained by earlier nodes.
 func TestParseStringsAfterBlockSwitch(t *testing.T) {
 	var sb strings.Builder
 	sb.WriteByte('[')
@@ -372,7 +383,7 @@ func TestParseStringsAfterBlockSwitch(t *testing.T) {
 		if i > 0 {
 			sb.WriteByte(',')
 		}
-		// 长度跨越块大小（4 KiB），迫使解析器多次换块。
+		// Sizes on both sides of 4 KiB exercise shared and oversized blocks.
 		want[i] = strings.Repeat(string(rune('a'+i%26)), i*7%5000)
 		sb.WriteString(`"`)
 		sb.WriteString(want[i])
@@ -392,7 +403,8 @@ func TestParseStringsAfterBlockSwitch(t *testing.T) {
 	}
 }
 
-// TestParseEscapesReuseScratch 覆盖转义解码暂存区的复用：相邻转义串不能互相污染。
+// TestParseEscapesReuseScratch checks that decoded strings survive subsequent
+// reuse of the escape buffer, including interleaved strings without escapes.
 func TestParseEscapesReuseScratch(t *testing.T) {
 	src := `["a\nb","plain","\u4e2d\u6587","long-long-long-long-long","\t\/\\","","\ud83d\ude00","x"]`
 	root := mustParse(t, src)
@@ -408,6 +420,8 @@ func TestParseEscapesReuseScratch(t *testing.T) {
 	}
 }
 
+// TestParseStringDecoding checks Unicode decoding and code-point length while
+// requiring [Node.Raw] to preserve the original escape spelling.
 func TestParseStringDecoding(t *testing.T) {
 	tests := []struct {
 		name string
@@ -449,6 +463,8 @@ func TestParseStringDecoding(t *testing.T) {
 	}
 }
 
+// TestParseNumberGrammar separates numeric syntax validity from magnitude and
+// requires specific diagnostics for incomplete fractions and exponents.
 func TestParseNumberGrammar(t *testing.T) {
 	valid := []string{
 		"0", "-0", "1", "-1", "1234567890",
@@ -494,7 +510,6 @@ func TestParseNumberGrammar(t *testing.T) {
 		})
 	}
 
-	// 错误信息应指向具体原因，而不是笼统的「unexpected character」。
 	for _, tt := range []struct{ src, want string }{
 		{src: "[1.]", want: "missing fraction digits"},
 		{src: "[1e]", want: "missing exponent digits"},
@@ -510,6 +525,8 @@ func TestParseNumberGrammar(t *testing.T) {
 	}
 }
 
+// TestParseSyntaxErrors checks rejection, typed diagnostics, and source offsets
+// without returning a partial document.
 func TestParseSyntaxErrors(t *testing.T) {
 	const unknownOffset = -1
 	tests := []struct {
@@ -569,6 +586,8 @@ func TestParseSyntaxErrors(t *testing.T) {
 	}
 }
 
+// TestParseMaxDepth checks the inclusive container limit and the default chosen
+// for nonpositive limits.
 func TestParseMaxDepth(t *testing.T) {
 	nested := func(depth int) []byte {
 		return []byte(strings.Repeat("[", depth) + strings.Repeat("]", depth))
@@ -605,6 +624,8 @@ func TestParseMaxDepth(t *testing.T) {
 	}
 }
 
+// TestParseStringHelper checks that the string entry point preserves the same
+// root source fragment as the byte entry point.
 func TestParseStringHelper(t *testing.T) {
 	fromBytes, err := Parse([]byte(`{"a":[1,true]}`))
 	if err != nil {
@@ -619,7 +640,8 @@ func TestParseStringHelper(t *testing.T) {
 	}
 }
 
-// TestParseRawAliasesInput 验证 Raw 与输入共享内存，而解码后的字符串是独立副本。
+// TestParseRawAliasesInput distinguishes retained source bytes from independently
+// stored string and numeric values.
 func TestParseRawAliasesInput(t *testing.T) {
 	data := []byte(`{"n":111,"s":"text"}`)
 	root, err := Parse(data)
@@ -629,7 +651,8 @@ func TestParseRawAliasesInput(t *testing.T) {
 	num := root.Get("n")
 	str := root.Get("s")
 
-	// 原地篡改输入：Raw 应随之改变（共享内存），已解析的值不应改变。
+	// Deliberately violate the caller's immutability requirement to observe
+	// which representations alias the input; this is not supported application use.
 	for i, c := range data {
 		switch {
 		case c >= 'a' && c <= 'z':
@@ -652,6 +675,7 @@ func TestParseRawAliasesInput(t *testing.T) {
 	}
 }
 
+// TestParseDoesNotModifyInput checks that decoding leaves the caller's bytes intact.
 func TestParseDoesNotModifyInput(t *testing.T) {
 	const src = ` {"a":[1,"\\u4e2d",null],"b":{}} `
 	data := []byte(src)
@@ -663,6 +687,7 @@ func TestParseDoesNotModifyInput(t *testing.T) {
 	}
 }
 
+// TestNodeNilGuards checks the two accessors that explicitly accept nil receivers.
 func TestNodeNilGuards(t *testing.T) {
 	var n *Node
 	if n.IsNull() {
@@ -673,9 +698,8 @@ func TestNodeNilGuards(t *testing.T) {
 	}
 }
 
-// TestParserGuards 覆盖扫描阶段的防御性检查。这些分支在 parseString 之后
-// 已经不可达（扫描时已拒绝同样的问题），保留它们是为了将来修改扫描逻辑时
-// 仍能返回错误而不是越界或产出错误数据。
+// TestParserGuards invokes internal routines directly to exercise rejection
+// paths normally preempted by the string scanner.
 func TestParserGuards(t *testing.T) {
 	t.Run("parseString 要求双引号", func(t *testing.T) {
 		p := &parser{src: []byte("x")}
@@ -711,6 +735,7 @@ func TestParserGuards(t *testing.T) {
 	})
 }
 
+// TestKindString checks diagnostic names, including the fallback for unknown kinds.
 func TestKindString(t *testing.T) {
 	tests := []struct {
 		kind Kind
@@ -731,6 +756,8 @@ func TestKindString(t *testing.T) {
 	}
 }
 
+// TestNumberCmp checks exact decimal ordering and antisymmetry for equivalent
+// spellings, large coefficients, and exponents beyond machine integer range.
 func TestNumberCmp(t *testing.T) {
 	tests := []struct {
 		a, b string

@@ -7,15 +7,20 @@ import (
 	"strings"
 )
 
-// Number 表示精确的 JSON 数值，避免浮点数的溢出与精度损失。
+// Number holds an exact decimal value, including exponents outside int64 range.
+// Its zero value is numeric zero. Copies may be compared concurrently.
 type Number struct {
+	// Nonzero values use a coefficient without leading or trailing zeros and
+	// a power of ten. An empty coefficient represents zero regardless of exponent.
 	digits      string
 	exponent    int64
 	bigExponent *big.Int
 	negative    bool
 }
 
-// ParseNumber 解析已校验的 JSON 数字文本。
+// ParseNumber converts valid JSON number text without rounding. The caller must
+// validate syntax first; empty input panics and other invalid input has no
+// defined result. All spellings of zero, including negative zero, compare equally.
 func ParseNumber(s string) Number {
 	var n Number
 	if s[0] == '-' {
@@ -68,7 +73,8 @@ func ParseNumber(s string) Number {
 	return n
 }
 
-// Cmp 比较两个数值，分别在小于、等于或大于 other 时返回 -1、0 或 1。
+// Cmp returns -1, 0, or 1 when n is less than, equal to, or greater than other.
+// Comparison is exact and does not mutate either operand.
 func (n Number) Cmp(other Number) int {
 	if n.negative != other.negative {
 		if n.negative {
@@ -95,7 +101,8 @@ func (n Number) compareAbs(other Number) int {
 	}
 	alen, blen := int64(len(n.digits)), int64(len(other.digits))
 	a, b := n.exponent, other.exponent
-	// 常见指数直接比较数量级，避免 big.Int 临时分配；加数均为正数。
+	// Decimal magnitude is exponent plus digit count. Positive counts can only
+	// overflow upward, so ordinary exponents need no [big.Int] allocation.
 	if n.bigExponent == nil && other.bigExponent == nil &&
 		a <= math.MaxInt64-alen && b <= math.MaxInt64-blen {
 		a, b = a+alen, b+blen
@@ -123,7 +130,8 @@ func (n Number) compareAbs(other Number) int {
 			return c
 		}
 	}
-	// 数量级相同时，缺少的末尾数字视为零，无需展开指数或分配补零字符串。
+	// Equal magnitudes align the first digits. Implicit trailing zeros let us
+	// compare coefficients without allocating strings proportional to the exponent.
 	length := len(n.digits)
 	if len(other.digits) > length {
 		length = len(other.digits)

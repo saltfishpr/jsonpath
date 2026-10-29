@@ -1,6 +1,10 @@
-// Package jsonpath 编译并执行 RFC 9535 JSONPath 查询。一次性查询可用
-// QueryValues 和 QueryNodes；重复查询可复用 Compile 返回的 Query。
-// Document 和查询结果中的 JSON 原文与输入字节共享内存；调用方不得修改输入或结果中的原文。
+// Package jsonpath evaluates RFC 9535 JSONPath expressions against JSON documents.
+// Use [QueryValues] or [QueryNodes] for a single evaluation, or reuse a [Query] and
+// [Document] to avoid compiling expressions and parsing documents repeatedly.
+//
+// Documents and result values retain the input bytes. Callers must keep those
+// bytes unchanged while using a document or its results, including through any
+// returned [json.RawMessage].
 package jsonpath
 
 import (
@@ -13,8 +17,8 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/parse"
 )
 
-// Query 是可重复执行的编译查询，可由多个 goroutine 并发使用。
-// 零值不可用，必须由 Compile 创建。
+// Query is a compiled expression that supports concurrent evaluation against
+// one or more documents. Create it with [Compile]; its zero value is not usable.
 type Query struct {
 	src       string
 	query     *ast.Query
@@ -23,7 +27,10 @@ type Query struct {
 	regexes   map[string]*iregexp.Regexp
 }
 
-// Compile 编译查询串。词法、语法和语义错误返回 *CompileError。
+// Compile parses src and checks function signatures and expression types.
+// Invalid JSONPath expressions return a *[CompileError] and a nil query.
+// Failures to compile regular expressions other than invalid pattern syntax
+// are returned as underlying errors.
 func Compile(src string) (*Query, error) {
 	q, err := parse.Parse(src)
 	if err != nil {
@@ -46,8 +53,11 @@ func Compile(src string) (*Query, error) {
 	}, nil
 }
 
-// Values 返回按选择顺序排列的原始 JSON 片段，保留重复项。
-// 无匹配时返回空切片；求值失败时不返回部分结果。q 和 doc 必须是 Compile 和 ParseDocument 返回的非 nil 值。
+// Values evaluates q against doc and returns matching JSON fragments in selection
+// order, preserving duplicates. No matches produce a non-nil empty slice; an
+// evaluation error produces a nil slice. Each fragment aliases the document's
+// input bytes and must not be modified.
+// Both q and doc must be non-nil values created by [Compile] and [ParseDocument].
 func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
 	nodes, err := q.run(doc)
 	if err != nil {
@@ -60,9 +70,11 @@ func (q *Query) Values(doc *Document) ([]json.RawMessage, error) {
 	return out, nil
 }
 
-// Nodes 返回按选择顺序排列的匹配节点及其 Normalized Path，并保留重复项。
-// 无匹配时返回空切片，求值失败时不返回部分结果。
-// q 和 doc 必须是 Compile 和 ParseDocument 返回的非 nil 值。
+// Nodes evaluates q against doc and returns matches with RFC 9535 Normalized
+// Paths in selection order, preserving duplicates. No matches produce a non-nil
+// empty slice; an evaluation error produces a nil slice. Result values alias
+// the document's input bytes and must not be modified.
+// Both q and doc must be non-nil values created by [Compile] and [ParseDocument].
 func (q *Query) Nodes(doc *Document) ([]Node, error) {
 	nodes, err := q.run(doc)
 	if err != nil {
@@ -75,15 +87,20 @@ func (q *Query) Nodes(doc *Document) ([]Node, error) {
 	return out, nil
 }
 
-// Document 是解析后的 JSON 文档。零值不可用，必须由 ParseDocument 创建。
-// 调用方应将其视为不可变。
+// Document is a parsed JSON value that can be queried concurrently while its
+// input bytes remain unchanged. Create it with [ParseDocument]; its zero value
+// is not usable.
 type Document struct {
 	root *document.Node
 	src  []byte
 }
 
-// ParseDocument 将 UTF-8 编码的 JSON 字节解析为 Document，允许 JSON 空白字符包围输入，
-// 但不接受 BOM、非法 UTF-8 或重复的对象成员名。解析错误返回 *DocumentError。
+// ParseDocument accepts exactly one JSON value with optional surrounding JSON
+// whitespace. It rejects a BOM, invalid UTF-8, unpaired surrogate escapes,
+// duplicate member names, and nesting beyond the parser's depth limit.
+// Invalid input returns a *[DocumentError] and a nil document.
+// The document retains data; callers must not modify it while the document
+// or any result values are in use.
 func ParseDocument(data []byte) (*Document, error) {
 	root, err := document.Parse(data)
 	if err != nil {
@@ -96,8 +113,10 @@ func ParseDocument(data []byte) (*Document, error) {
 	return &Document{root: root, src: data}, nil
 }
 
-// QueryValues 返回 expr 在 data 中匹配的原始 JSON 片段，按选择顺序保留重复项。
-// 无匹配时返回空切片。
+// QueryValues compiles expr, parses data, and returns matches as described by
+// [Query.Values]. Compilation errors take precedence over document errors.
+// On any error it returns a nil slice. Returned fragments alias data and must
+// not be modified.
 func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
 	query, err := Compile(expr)
 	if err != nil {
@@ -110,14 +129,20 @@ func QueryValues(expr string, data []byte) ([]json.RawMessage, error) {
 	return query.Values(doc)
 }
 
-// Node 包含匹配节点的原始 JSON 片段及其 Normalized Path。
+// Node identifies one match. Repeated selections of the same location produce
+// separate [Node] entries with the same path.
 type Node struct {
+	// Value is the original JSON fragment, including whitespace within containers.
+	// It aliases the input bytes and must not be modified.
 	Value json.RawMessage
-	Path  string
+	// Path is an RFC 9535 Normalized Path identifying the value from the root.
+	Path string
 }
 
-// QueryNodes 返回 expr 在 data 中匹配的节点及其 Normalized Path，按选择顺序保留重复项。
-// 无匹配时返回空切片。
+// QueryNodes compiles expr, parses data, and returns matches as described by
+// [Query.Nodes]. Compilation errors take precedence over document errors.
+// On any error it returns a nil slice. Returned values alias data and must
+// not be modified.
 func QueryNodes(expr string, data []byte) ([]Node, error) {
 	query, err := Compile(expr)
 	if err != nil {

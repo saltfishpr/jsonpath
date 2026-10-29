@@ -7,36 +7,47 @@ import (
 	"unicode/utf8"
 )
 
-// DefaultMaxDepth 是递归解析默认允许的最大嵌套层数。
-// 超过此层数会返回 SyntaxError，防止恶意输入耗尽 goroutine 栈。
+// DefaultMaxDepth limits simultaneously nested arrays and objects when no
+// positive depth limit is supplied. Scalars do not add a nesting level.
 const DefaultMaxDepth = 10000
 
-// SyntaxError 表示 JSON 文本不合法。Offset 是检测到问题处的字节偏移。
+// SyntaxError reports invalid JSON or a violation of the parser's Unicode,
+// member uniqueness, or nesting requirements.
 type SyntaxError struct {
-	Offset  int
+	// Offset is the zero-based byte position where the error was detected.
+	// A position equal to the input length denotes EOF.
+	Offset int
+	// Message describes the failure without a location prefix.
 	Message string
 }
 
+// Error returns the diagnostic with its byte offset in the input.
 func (e *SyntaxError) Error() string {
 	return fmt.Sprintf("document: json syntax error at offset %d: %s", e.Offset, e.Message)
 }
 
-// Parse 解析恰好一个 JSON 值并返回根节点，允许值前后出现空白。
+// Parse reads one JSON value with optional surrounding JSON whitespace, using
+// [DefaultMaxDepth]. It rejects a BOM, invalid UTF-8, unpaired surrogate escapes,
+// and duplicate decoded object names. Errors are *[SyntaxError] with a nil root.
+// Nodes' [Node.Raw] slices alias data, which must remain unchanged while the tree is
+// in use; decoded strings and numeric values are stored independently.
 func Parse(data []byte) (*Node, error) {
 	return ParseWithDepth(data, DefaultMaxDepth)
 }
 
-// ParseString 解析字符串中的 JSON 值并返回根节点。
+// ParseString parses s with the validation and depth limit of [Parse].
+// Returned [Node.Raw] slices must be treated as immutable.
 func ParseString(s string) (*Node, error) {
 	return Parse([]byte(s))
 }
 
-// ParseWithDepth 解析 JSON 值；maxDepth <= 0 时使用 DefaultMaxDepth。
+// ParseWithDepth behaves like [Parse] with a caller-specified container nesting
+// limit. A root array or object has depth one; maxDepth <= 0 selects
+// [DefaultMaxDepth]. Exceeding the limit returns a *[SyntaxError] and a nil root.
 func ParseWithDepth(data []byte, maxDepth int) (*Node, error) {
 	if maxDepth <= 0 {
 		maxDepth = DefaultMaxDepth
 	}
-	// 按 I-JSON / RFC 7493 拒绝 BOM，而不是忽略它。
 	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
 		return nil, &SyntaxError{Offset: 0, Message: "unexpected byte order mark (U+FEFF)"}
 	}
@@ -67,7 +78,8 @@ type parser struct {
 
 func (p *parser) newNode(kind Kind) *Node {
 	if len(p.nodes) == 0 {
-		// 64 位布局下，23 个节点连同分配头可放进 4 KiB 的分配档位。
+		// With the 64-bit Node layout, 23 nodes plus allocation metadata fit
+		// the allocator's 4 KiB size class.
 		const maxBlockSize = 23
 		size := p.nodeBlockSize
 		p.nodeBlockSize *= 2
@@ -77,7 +89,7 @@ func (p *parser) newNode(kind Kind) *Node {
 		if remaining := len(p.src) - p.pos + 1; size > remaining {
 			size = remaining
 		}
-		// 已返回的节点仍持有旧块，后续分配必须使用新块。
+		// Previously issued pointers must keep their addresses and contents.
 		p.nodes = make([]Node, size)
 	}
 	n := &p.nodes[0]
@@ -88,7 +100,7 @@ func (p *parser) newNode(kind Kind) *Node {
 }
 
 func (p *parser) storeString(raw []byte) string {
-	// 根标量没有后续字符串可共享，直接复制可避免建立字符串块。
+	// Tiny strings and values ending at EOF cannot benefit from a shared block.
 	if len(raw) < 2 || p.pos == len(p.src) {
 		return string(raw)
 	}
@@ -106,7 +118,8 @@ func (p *parser) storeString(raw []byte) string {
 		if remaining := len(p.src) - p.pos + len(raw); capacity > remaining {
 			capacity = remaining
 		}
-		// 已返回的字符串引用旧缓冲；换块避免扩容时复制并保留旧内容。
+		// Existing strings retain the old buffer. Starting a new block avoids
+		// copying bytes that future strings will never use.
 		p.text.Reset()
 		p.text.Grow(capacity)
 	}
@@ -130,7 +143,7 @@ func (p *parser) skipWS() {
 	}
 }
 
-// depth 表示当前所在容器的嵌套层数（顶层为 0）。
+// depth counts enclosing containers, so entering an array or object adds one.
 func (p *parser) parseValue(depth int) (node *Node, err error) {
 	start := p.pos
 	defer func() {
@@ -167,7 +180,7 @@ func (p *parser) parseValue(depth int) (node *Node, err error) {
 	return nil, p.errf("unexpected character %q", p.src[p.pos])
 }
 
-// 每个节点需要独立的位置信息，不能复用单例。
+// Equal scalar values still need distinct nodes for parent links and [Node.Raw] slices.
 func (p *parser) parseLiteral(lit string, kind Kind, b bool) (*Node, error) {
 	if p.pos+len(lit) > len(p.src) || string(p.src[p.pos:p.pos+len(lit)]) != lit {
 		return nil, p.errf("invalid literal, expected %q", lit)
@@ -200,7 +213,7 @@ func (p *parser) parseObject(depth int) (*Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		// 按 I-JSON / RFC 7493 拒绝重复键，避免查询语义不确定。
+		// Compare decoded names so escaped spellings cannot create ambiguous members.
 		if _, dup := memberIndex[key]; dup {
 			return nil, &SyntaxError{Offset: keyPos, Message: fmt.Sprintf("duplicate object member %q", key)}
 		}
@@ -281,7 +294,8 @@ func (p *parser) parseArray(depth int) (*Node, error) {
 	}
 }
 
-// parseString 扫描 JSON 字符串并返回解码文本，同时拒绝控制字符、非法 UTF-8 和不成对的代理。
+// Scan before allocating decoded storage so strings without escapes need only
+// one copy. Both paths must produce valid Unicode scalar sequences.
 func (p *parser) parseString() (string, error) {
 	if p.pos >= len(p.src) || p.src[p.pos] != '"' {
 		return "", p.errf("expected '\"'")
@@ -301,7 +315,8 @@ func (p *parser) parseString() (string, error) {
 		}
 		if c == '\\' {
 			hasEscape = true
-			// 跳过转义字符，避免把 \" 误判为字符串结束；unescape 再校验转义。
+			// An escaped quote cannot terminate the string. Escape validity is
+			// checked by unescape after the closing quote is found.
 			if i+1 >= len(p.src) {
 				p.pos = i
 				return "", p.errf("unterminated escape at end of input")
@@ -328,7 +343,7 @@ func (p *parser) parseString() (string, error) {
 	return "", p.errf("unterminated string literal")
 }
 
-// start 为 raw[0] 在原始输入中的偏移，用于错误信息。
+// start maps offsets in the unquoted raw fragment back to the original input.
 func (p *parser) unescape(raw []byte, start int) (string, error) {
 	out := p.scratch[:0]
 	if cap(out) < len(raw) {
@@ -380,7 +395,8 @@ func (p *parser) unescape(raw []byte, start int) (string, error) {
 				}
 				i += 5
 				if utf16.IsSurrogate(r) {
-					// 必须是高位代理 D800–DBFF，后跟 \uDCxx-\uDFxx
+					// Surrogates are valid only as a high/low pair; never replace
+					// malformed input with a replacement character.
 					if r >= 0xDC00 ||
 						i+6 > len(raw) || raw[i] != '\\' || raw[i+1] != 'u' {
 						p.pos = start + i
@@ -425,7 +441,7 @@ func (p *parser) unescape(raw []byte, start int) (string, error) {
 		out = append(out, raw[i:i+size]...)
 		i += size
 	}
-	// 解码暂存区仅用于本次 Parse，字符串存储复制后可供下一个转义串复用。
+	// storeString copies the decoded bytes before the next string reuses scratch.
 	p.scratch = out[:0]
 	return p.storeString(out), nil
 }
@@ -448,7 +464,8 @@ func hex4(b []byte) (rune, bool) {
 	return r, true
 }
 
-// parseNumber 按 RFC 8259 校验数字并解析精确数值。
+// Validate the numeric prefix before calling [ParseNumber], which assumes valid
+// syntax. The enclosing container or EOF check rejects any trailing characters.
 func (p *parser) parseNumber() (*Node, error) {
 	start := p.pos
 	i := p.pos

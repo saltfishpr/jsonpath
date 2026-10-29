@@ -22,7 +22,8 @@ type evaluator struct {
 	literals  map[*ast.Literal]*document.Node
 	regexes   map[string]*iregexp.Regexp
 
-	// 本次求值遇到的动态模式，按需创建。
+	// Keep runtime patterns local to this evaluation so concurrent [Query] calls
+	// never mutate the compiled query's shared caches.
 	dynamicRegexes map[string]*iregexp.Regexp
 }
 
@@ -44,7 +45,7 @@ func (e *evaluator) query(q *ast.Query, current *document.Node) ([]*document.Nod
 func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) ([]*document.Node, error) {
 	var out []*document.Node
 	if len(inputs) == 1 {
-		// 单个输入会在循环开始时复制到 in，复用切片不会覆盖尚未读取的节点。
+		// Reuse is safe only when range captures the sole input before any append.
 		out = inputs[:0]
 	}
 	for _, in := range inputs {
@@ -67,7 +68,8 @@ func (e *evaluator) segment(seg ast.Segment, inputs []*document.Node) ([]*docume
 	return out, nil
 }
 
-// descendants 按前序访问节点（包含自身），先应用全部 selector，再访问子节点。
+// Apply all selectors at a node before descending to preserve the RFC 9535
+// ordering between ancestor and descendant selections.
 func (e *evaluator) descendants(selectors []ast.Selector, in *document.Node, out []*document.Node) ([]*document.Node, error) {
 	var err error
 	for _, sel := range selectors {
@@ -191,7 +193,7 @@ func (e *evaluator) sliceSelector(s *ast.SliceSelector, in *document.Node, out [
 	if step > 0 {
 		for i := start; i < end; {
 			out = append(out, in.Array()[i])
-			// 在相加前判断是否到达边界，避免大步长导致整数溢出。
+			// Check the remaining distance before adding a potentially overflowing step.
 			if step >= end-i {
 				break
 			}

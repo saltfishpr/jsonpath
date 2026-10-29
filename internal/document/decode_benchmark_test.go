@@ -6,7 +6,6 @@ import (
 	"testing"
 )
 
-// 各 fixture 都是确定性生成的，避免基准之间因为数据差异互相干扰。
 func fixtureObject(members int) []byte {
 	var sb strings.Builder
 	sb.Grow(members * 16)
@@ -86,8 +85,9 @@ func fixtureMixed(n int) []byte {
 	return []byte(sb.String())
 }
 
-// BenchmarkParse 覆盖不同文档形态：解析器的瓶颈随标量种类、转义、嵌套深度
-// 而不同，单一形态的数字不足以判断优化是否有效。
+// BenchmarkParse measures throughput and allocations across independent parser
+// workloads: object lookup construction, numeric conversion, string storage,
+// escape decoding, and recursion. Deterministic fixtures are built before timing.
 func BenchmarkParse(b *testing.B) {
 	cases := []struct {
 		name string

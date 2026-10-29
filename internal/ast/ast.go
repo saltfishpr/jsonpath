@@ -1,70 +1,78 @@
-// Package ast 定义 RFC 9535 JSONPath 的抽象语法树。
-// 查询和表达式节点保留源码位置，供编译器报告错误。
+// Package ast represents JSONPath syntax with source positions for diagnostics.
+// Trees describe parsed structure; function names and types still require
+// semantic validation before evaluation.
 package ast
 
-// Pos 表示源码位置。
+// Pos locates a token in the original expression.
 type Pos struct {
-	Offset int // 从 0 开始的字节偏移
-	Line   int // 从 1 开始的行号
-	Col    int // 从 1 开始的列号，按 rune 计数
+	Offset int // Zero-based byte offset.
+	Line   int // One-based line number.
+	Col    int // One-based column counted in runes.
 }
 
-// Query 表示根查询或当前节点查询。
+// Query applies [Query.Segments] in order from the root or the current filter node.
+// An empty segment list selects the starting node itself.
 type Query struct {
-	IsRoot   bool // true 表示根查询（$），false 表示当前节点查询（@）
+	IsRoot   bool // True starts at $; false starts at @.
 	Segments []Segment
 	Pos      Pos
 }
 
-// SegmentKind 表示查询段的种类。
+// SegmentKind determines which nodes receive a segment's selectors.
 type SegmentKind uint8
 
 const (
-	// SegChild 选择子节点。
+	// SegChild applies selectors to each input node.
 	SegChild SegmentKind = iota
-	// SegDescendant 选择后代节点。
+	// SegDescendant applies selectors to each input node and all its descendants.
 	SegDescendant
 )
 
-// Segment 表示包含一个或多个选择器的查询段。
+// Segment combines selector results in source order without deduplication.
 type Segment struct {
 	Kind      SegmentKind
-	Selectors []Selector // 至少一个
+	Selectors []Selector // Must contain at least one selector.
 	Pos       Pos
 }
 
-// Selector 表示查询段中的选择器。
+// Selector is a selection rule implemented only by this package's node types.
 type Selector interface {
 	selectorNode()
-	// Position 返回选择器的源码位置。
+	// Position returns the selector's starting source position.
 	Position() Pos
 }
 
-// NameSelector 按成员名选择节点。
+// NameSelector selects an object member by its decoded name, without Unicode
+// normalization. It selects nothing from non-object inputs.
 type NameSelector struct {
-	Name string // 解码后的 UTF-8 字符串
-	Raw  string // 原文（含引号或点号后的 member-name-shorthand）
+	Name string // Decoded UTF-8 member name.
+	Raw  string // Source spelling, including quotes when present.
 	Pos  Pos
 }
 
-// WildcardSelector 选择所有子节点。
+// WildcardSelector selects all immediate array elements or object member values.
+// Scalars have no children.
 type WildcardSelector struct {
 	Pos Pos
 }
 
-// IndexSelector 按数组下标选择节点。
+// IndexSelector selects an array element by zero-based index. Negative indices
+// count from the end; out-of-range indices select nothing.
 type IndexSelector struct {
 	Index int64
 	Pos   Pos
 }
 
-// SliceSelector 按切片范围选择数组元素；nil 表示省略对应参数。
+// SliceSelector selects array elements with an exclusive end bound. Nil fields
+// retain omitted arguments for direction-dependent defaults; a zero step
+// selects nothing.
 type SliceSelector struct {
 	Start, End, Step *int64
 	Pos              Pos
 }
 
-// FilterSelector 按逻辑表达式筛选子节点。
+// FilterSelector tests [FilterSelector.Expr] with each immediate child as the current node.
+// Only children for which the expression is true are selected.
 type FilterSelector struct {
 	Expr LogicalExpr
 	Pos  Pos
@@ -76,82 +84,91 @@ func (*IndexSelector) selectorNode()    {}
 func (*SliceSelector) selectorNode()    {}
 func (*FilterSelector) selectorNode()   {}
 
-func (n *NameSelector) Position() Pos     { return n.Pos }
-func (n *WildcardSelector) Position() Pos { return n.Pos }
-func (n *IndexSelector) Position() Pos    { return n.Pos }
-func (n *SliceSelector) Position() Pos    { return n.Pos }
-func (n *FilterSelector) Position() Pos   { return n.Pos }
+// Position returns the member selector's starting source position.
+func (n *NameSelector) Position() Pos { return n.Pos }
 
-// Expr 表示 filter 中的表达式。
+// Position returns the wildcard's source position.
+func (n *WildcardSelector) Position() Pos { return n.Pos }
+
+// Position returns the index token's source position.
+func (n *IndexSelector) Position() Pos { return n.Pos }
+
+// Position returns the slice's starting source position.
+func (n *SliceSelector) Position() Pos { return n.Pos }
+
+// Position returns the filter's question-mark position.
+func (n *FilterSelector) Position() Pos { return n.Pos }
+
+// Expr is a filter expression implemented only by this package's node types.
 type Expr interface {
 	exprNode()
-	// Position 返回表达式的源码位置。
+	// Position returns the source location used to diagnose this expression.
 	Position() Pos
 }
 
-// LogicalExpr 是逻辑上下文中的表达式（&&、||、!、比较、test）。
+// LogicalExpr marks syntax that yields a logical result after semantic validation.
 type LogicalExpr interface {
 	Expr
 	logicalExpr()
 }
 
-// Comparable 是 ComparisonExpr 两侧允许出现的表达式。
-// RFC 9535 §2.3.5.2 规定两侧必须是：literal / singular-query / 返回 ValueType 的函数调用。
+// Comparable marks syntax allowed as a comparison operand. Function calls
+// satisfy this interface before their ValueType return requirement is checked.
 type Comparable interface {
 	Expr
 	comparable()
 }
 
-// OrExpr 表示逻辑或表达式。
+// OrExpr is a disjunction whose operands retain source evaluation order.
 type OrExpr struct {
-	Operands []LogicalExpr // 长度 >= 2
+	Operands []LogicalExpr // At least two operands.
 	Pos      Pos
 }
 
-// AndExpr 表示逻辑与表达式。
+// AndExpr is a conjunction whose operands retain source evaluation order.
 type AndExpr struct {
-	Operands []LogicalExpr // 长度 >= 2
+	Operands []LogicalExpr // At least two operands.
 	Pos      Pos
 }
 
-// NotExpr 表示逻辑非表达式。
+// NotExpr negates a logical expression; [NotExpr.Pos] locates the exclamation mark.
 type NotExpr struct {
 	Operand LogicalExpr
 	Pos     Pos
 }
 
-// ParenExpr 是 (expr)，保留括号便于格式化输出。
+// ParenExpr preserves explicit grouping and the opening parenthesis position.
 type ParenExpr struct {
 	Inner LogicalExpr
 	Pos   Pos
 }
 
-// ComparisonExpr 表示比较表达式。
+// ComparisonExpr compares two ValueType operands; [ComparisonExpr.Pos] locates the operator.
 type ComparisonExpr struct {
 	Op          CmpOp
 	Left, Right Comparable
 	Pos         Pos
 }
 
-// CmpOp 表示比较运算符。
+// CmpOp identifies an RFC 9535 comparison, whose operands may include Nothing.
 type CmpOp uint8
 
 const (
-	// CmpEq 表示 ==。
+	// CmpEq tests equality, including equality between two missing values.
 	CmpEq CmpOp = iota
-	// CmpNe 表示 !=。
+	// CmpNe negates equality.
 	CmpNe
-	// CmpLt 表示 <。
+	// CmpLt orders numbers or strings strictly.
 	CmpLt
-	// CmpLe 表示 <=。
+	// CmpLe accepts either less-than ordering or equality.
 	CmpLe
-	// CmpGt 表示 >。
+	// CmpGt reverses the operands of less-than ordering.
 	CmpGt
-	// CmpGe 表示 >=。
+	// CmpGe accepts either greater-than ordering or equality.
 	CmpGe
 )
 
-// String returns the comparison operator's source spelling.
+// String returns the JSONPath operator spelling, or "?" for an unknown value.
 func (op CmpOp) String() string {
 	switch op {
 	case CmpEq:
@@ -170,9 +187,10 @@ func (op CmpOp) String() string {
 	return "?"
 }
 
-// TestExpr 表示 filter 中用于存在性测试的查询或函数调用。
+// TestExpr uses a query's non-emptiness or a function's logical result as a
+// condition, optionally negated. ValueType functions are invalid targets.
 type TestExpr struct {
-	Target  Expr // *FilterQuery 或 *FunctionCall（Logical/Nodes 返回类型）
+	Target  Expr // *FilterQuery or *FunctionCall returning LogicalType or NodesType.
 	Negated bool
 	Pos     Pos
 }
@@ -184,12 +202,23 @@ func (*ParenExpr) exprNode()      {}
 func (*ComparisonExpr) exprNode() {}
 func (*TestExpr) exprNode()       {}
 
-func (e *OrExpr) Position() Pos         { return e.Pos }
-func (e *AndExpr) Position() Pos        { return e.Pos }
-func (e *NotExpr) Position() Pos        { return e.Pos }
-func (e *ParenExpr) Position() Pos      { return e.Pos }
+// Position returns the first operand's source position.
+func (e *OrExpr) Position() Pos { return e.Pos }
+
+// Position returns the first operand's source position.
+func (e *AndExpr) Position() Pos { return e.Pos }
+
+// Position returns the negation operator's source position.
+func (e *NotExpr) Position() Pos { return e.Pos }
+
+// Position returns the opening parenthesis position.
+func (e *ParenExpr) Position() Pos { return e.Pos }
+
+// Position returns the comparison operator's source position.
 func (e *ComparisonExpr) Position() Pos { return e.Pos }
-func (e *TestExpr) Position() Pos       { return e.Pos }
+
+// Position returns the test's starting source position.
+func (e *TestExpr) Position() Pos { return e.Pos }
 
 func (*OrExpr) logicalExpr()         {}
 func (*AndExpr) logicalExpr()        {}
@@ -198,23 +227,27 @@ func (*ParenExpr) logicalExpr()      {}
 func (*ComparisonExpr) logicalExpr() {}
 func (*TestExpr) logicalExpr()       {}
 
-// LiteralKind 表示字面量的种类。
+// LiteralKind selects the relevant decoded field or numeric source text in a
+// [LiteralValue].
 type LiteralKind uint8
 
 const (
-	// LitString 表示字符串字面量。
+	// LitString uses the decoded [LiteralValue.Str] field.
 	LitString LiteralKind = iota
-	// LitInt 表示整数字面量。
+	// LitInt uses [LiteralValue.Raw] for a number without a fraction or exponent.
 	LitInt
-	// LitFloat 表示带小数或指数的数字字面量。
+	// LitFloat uses [LiteralValue.Raw] for a number with a fraction or exponent; it does not
+	// imply conversion to floating point.
 	LitFloat
-	// LitBool 表示布尔字面量。
+	// LitBool uses the [LiteralValue.Bool] field.
 	LitBool
-	// LitNull 表示 null 字面量。
+	// LitNull represents JSON null and needs no decoded payload.
 	LitNull
 )
 
-// LiteralValue 保存字面量的值和原文。
+// LiteralValue retains source text in [LiteralValue.Raw], including string quotes.
+// [LiteralValue.Kind] determines whether [LiteralValue.Str] or [LiteralValue.Bool]
+// is meaningful; numbers remain exact in [LiteralValue.Raw].
 type LiteralValue struct {
 	Kind LiteralKind
 	Str  string
@@ -222,35 +255,38 @@ type LiteralValue struct {
 	Raw  string
 }
 
-// Literal 表示字面量表达式。
+// Literal supplies a JSON scalar value independently of the current node.
 type Literal struct {
 	Value LiteralValue
 	Pos   Pos
 }
 
-// SingularQuery 是只含 name/index selector 的查询，静态可判定最多一个节点。
+// SingularQuery contains only single name or index selections, so it can yield
+// at most one node. [SingularQuery.IsRoot] chooses $ over @; no segments select that node itself.
 type SingularQuery struct {
 	IsRoot   bool
 	Segments []SingularSegment
 	Pos      Pos
 }
 
-// SingularSegment 表示一个 name 或 index selector。
-// Name 和 Index 必须恰有一个非 nil；指针用于区分未设置与合法的空成员名、索引零。
+// SingularSegment selects one object member or array element. Exactly one of
+// [SingularSegment.Name] and [SingularSegment.Index] must be non-nil; empty names and index zero are valid selections.
 type SingularSegment struct {
 	Name  *string
 	Index *int64
 	Pos   Pos
 }
 
-// FunctionCall 表示函数调用。
+// FunctionCall retains arguments in source order. The compiler must resolve
+// [FunctionCall.Name] and validate argument and result types before evaluation.
 type FunctionCall struct {
 	Name string
 	Args []Expr
 	Pos  Pos
 }
 
-// FilterQuery 表示 filter 中返回节点列表的查询。
+// FilterQuery yields a node list inside a filter. Context determines whether
+// that list is used directly, tested for existence, or converted to a value.
 type FilterQuery struct {
 	Query *Query
 	Pos   Pos
@@ -261,13 +297,18 @@ func (*SingularQuery) exprNode() {}
 func (*FunctionCall) exprNode()  {}
 func (*FilterQuery) exprNode()   {}
 
-func (n *Literal) Position() Pos       { return n.Pos }
+// Position returns the literal token's source position.
+func (n *Literal) Position() Pos { return n.Pos }
+
+// Position returns the query's $ or @ position.
 func (n *SingularQuery) Position() Pos { return n.Pos }
-func (n *FunctionCall) Position() Pos  { return n.Pos }
-func (n *FilterQuery) Position() Pos   { return n.Pos }
+
+// Position returns the function name's source position.
+func (n *FunctionCall) Position() Pos { return n.Pos }
+
+// Position returns the query's $ or @ position.
+func (n *FilterQuery) Position() Pos { return n.Pos }
 
 func (*Literal) comparable()       {}
 func (*SingularQuery) comparable() {}
-
-// 函数返回类型由编译阶段检查，此处先允许函数调用作为比较操作数。
-func (*FunctionCall) comparable() {}
+func (*FunctionCall) comparable()  {}

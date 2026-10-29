@@ -44,7 +44,7 @@ func (e *evaluator) evalLogical(expr ast.Expr, cur *document.Node) (bool, error)
 	case *ast.TestExpr:
 		return e.evalTest(v, cur)
 	case *ast.FilterQuery:
-		// LogicalType 形参位置收到子查询时，按 RFC 9535 §2.4.3 转为存在性判定。
+		// NodesType converts to LogicalType by existence, even for a null or false node.
 		nodes, err := e.query(v.Query, cur)
 		if err != nil {
 			return false, err
@@ -77,7 +77,8 @@ func (e *evaluator) evalTest(t *ast.TestExpr, cur *document.Node) (bool, error) 
 	return ok, nil
 }
 
-// 第二个返回值为 true 时表示 Nothing，用以与 JSON null 区分。
+// The boolean marks RFC 9535 Nothing: a missing value is distinct from a
+// selected JSON null and participates differently in comparisons.
 func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (*document.Node, bool, error) {
 	switch v := c.(type) {
 	case *ast.Literal:
@@ -233,13 +234,15 @@ func compareLt(a *document.Node, aNothing bool, b *document.Node, bNothing bool)
 	case document.KindNumber:
 		return a.Number().Cmp(b.Number()) < 0
 	case document.KindString:
+		// Valid UTF-8 preserves Unicode scalar ordering in bytewise comparisons.
 		return a.String() < b.String()
 	}
 	return false
 }
 
 func (e *evaluator) callFunction(f *ast.FunctionCall, compiledFunc compiledFunctionCall, cur *document.Node) (functionValue, error) {
-	// 内置函数最多接收两个参数；直接分派调用可让参数缓冲留在栈上。
+	// Builtin signatures have at most two arguments. Direct calls let the
+	// argument storage remain on the stack.
 	var storage [2]functionValue
 	args := storage[:len(compiledFunc.arguments)]
 	for i, arg := range compiledFunc.arguments {
@@ -284,7 +287,6 @@ func (e *evaluator) prepareArg(arg compiledArgument, want exprType, cur *documen
 		}
 		return functionValue{nodes: nodes}, nil
 	default:
-		// 内置函数签名只允许上述三种类型；其他类型表示内部定义违反约束。
 		panic(fmt.Sprintf("jsonpath: invalid function parameter type %v", want))
 	}
 }

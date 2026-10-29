@@ -13,40 +13,42 @@ type tokenKind uint8
 const (
 	tkEOF tokenKind = iota
 	tkError
-	tkWhitespace // 连续的空格、Tab、换行或回车
+	tkWhitespace // A complete run of JSON whitespace, retained for adjacency checks.
 
-	tkRoot     // $
-	tkCurrent  // @
-	tkDot      // .
-	tkDotDot   // ..
-	tkLBracket // [
-	tkRBracket // ]
-	tkLParen   // (
-	tkRParen   // )
-	tkComma    // ,
-	tkColon    // :
-	tkStar     // *
-	tkQuestion // ?
+	tkRoot
+	tkCurrent
+	tkDot
+	tkDotDot
+	tkLBracket
+	tkRBracket
+	tkLParen
+	tkRParen
+	tkComma
+	tkColon
+	tkStar
+	tkQuestion
 
-	tkName   // member-name-shorthand 或 函数名
-	tkString // 'foo' / "foo"（已解码）
+	tkName // Shared by member shorthand and function names; the parser distinguishes them.
+	tkString
 	tkInt
-	tkFloat // 带小数或指数
+	tkFloat // A fraction or exponent is present; no floating-point conversion occurs.
 	tkTrue
 	tkFalse
 	tkNull
 
-	tkEq  // ==
-	tkNe  // !=
-	tkLt  // <
-	tkLe  // <=
-	tkGt  // >
-	tkGe  // >=
-	tkAnd // &&
-	tkOr  // ||
-	tkNot // !
+	tkEq
+	tkNe
+	tkLt
+	tkLe
+	tkGt
+	tkGe
+	tkAnd
+	tkOr
+	tkNot
 )
 
+// String returns an operator spelling or diagnostic token name, or "?" for
+// an unknown kind.
 func (k tokenKind) String() string {
 	switch k {
 	case tkEOF:
@@ -117,8 +119,8 @@ func (k tokenKind) String() string {
 
 type token struct {
 	Kind  tokenKind
-	Value string // 字符串/标识符的解码值；数字存原文
-	Raw   string // 源串原始片段
+	Value string // Decoded strings; original spelling for names, numbers, and keywords.
+	Raw   string // Exact source fragment, including string delimiters.
 	Pos   ast.Pos
 }
 
@@ -145,7 +147,8 @@ type lexer struct {
 	line   int
 	col    int
 	tokens []token
-	err    error
+	// Preserve a UTF-8 failure even if the token scanner reports a secondary error.
+	err error
 }
 
 func (l *lexer) pos() ast.Pos { return ast.Pos{Offset: l.off, Line: l.line, Col: l.col} }
@@ -491,6 +494,7 @@ func (l *lexer) lexNameOrKeyword(start ast.Pos) (token, error) {
 	return token{Kind: tkName, Value: raw, Raw: raw, Pos: start}, nil
 }
 
+// Member shorthand permits every non-ASCII Unicode scalar, not just letters.
 func isNameFirst(r rune) bool {
 	switch {
 	case r == '_':

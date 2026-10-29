@@ -8,10 +8,11 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-// 字段的有效性由函数签名决定，无需在每个值中重复保存类型。
+// The compiled function signature determines which field is active. ValueType
+// uses value and nothing; LogicalType uses logical; NodesType uses nodes.
 type functionValue struct {
 	value   *document.Node
-	nothing bool // 区别于 JSON null。
+	nothing bool // Nothing has no JSON representation; a null node is an ordinary value.
 	logical bool
 	nodes   []*document.Node
 }
@@ -72,7 +73,7 @@ func (e *evaluator) matchRegexp(args []functionValue, search bool) (functionValu
 		if e.dynamicRegexes == nil {
 			e.dynamicRegexes = make(map[string]*iregexp.Regexp)
 		}
-		// nil 也写入缓存，避免对无效模式重复编译。
+		// A cached nil records invalid syntax, which must yield false on every use.
 		e.dynamicRegexes[patternText] = r
 	}
 	if r == nil {

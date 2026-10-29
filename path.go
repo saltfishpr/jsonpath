@@ -29,7 +29,8 @@ func normalizedPath(n *document.Node) string {
 		} else {
 			sb.WriteByte('\'')
 			name := node.Name()
-			// RFC 9535 第 2.7 节只要求转义这些 ASCII 字节，其余字符原样保留。
+			// Normalized Paths require specific escapes, including lowercase hex.
+			// All escaped characters are ASCII, so other UTF-8 bytes pass through.
 			for j := 0; j < len(name); j++ {
 				c := name[j]
 				switch c {

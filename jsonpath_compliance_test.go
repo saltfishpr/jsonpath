@@ -45,11 +45,15 @@ func matching(t *testing.T, nodes []jsonpath.Node, values []json.RawMessage, pat
 	return true
 }
 
+// These fixtures assign anchor semantics to ^ and $, which I-Regexp treats as
+// literals. testdata/README.md records the upstream discrepancy.
 var complianceCasesToSkip = map[string]struct{}{
 	"functions, match, explicit caret":  {},
 	"functions, match, explicit dollar": {},
 }
 
+// TestCompliance accepts any value/path ordering explicitly allowed by the
+// vendored suite while requiring invalid selectors to fail compilation.
 func TestCompliance(t *testing.T) {
 	data, err := os.ReadFile("testdata/cts.json")
 	if err != nil {
@@ -63,8 +67,6 @@ func TestCompliance(t *testing.T) {
 	}
 	for _, tc := range suite.Tests {
 		t.Run(tc.Name, func(t *testing.T) {
-			// These cases incorrectly treat ordinary I-Regexp characters as anchors;
-			// see testdata/README.md.
 			if _, skip := complianceCasesToSkip[tc.Name]; skip {
 				t.Skip("upstream fixture has incorrect expectations")
 			}

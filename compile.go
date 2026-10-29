@@ -9,7 +9,7 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
-// exprType 对应 RFC 9535 §2.4.1 的三种类型。
+// exprType describes function argument and result types, not JSON value kinds.
 type exprType uint8
 
 const (
@@ -19,6 +19,7 @@ const (
 	exprTypeNodes
 )
 
+// String returns the RFC 9535 type name, or "invalid" for an unknown type.
 func (t exprType) String() string {
 	switch t {
 	case exprTypeValue:
@@ -31,7 +32,8 @@ func (t exprType) String() string {
 	return "invalid"
 }
 
-// 编译结果单独保存，成功和失败的编译都不修改输入 AST。
+// Semantic annotations live outside the AST so validation can fail without
+// leaving a partially rewritten syntax tree.
 type compiler struct {
 	functions map[*ast.FunctionCall]compiledFunctionCall
 	literals  map[*ast.Literal]*document.Node
@@ -43,8 +45,9 @@ type compiledFunctionCall struct {
 	arguments  []compiledArgument
 }
 
-// 形参类型决定有效字段：ValueType 使用 value，LogicalType/NodesType 使用 expr。
-// 派生的 singular query 由编译结果持有，避免替换 AST 中的原始实参。
+// The parameter type selects the active field: value for ValueType, expr for
+// LogicalType or NodesType. A derived singular query belongs here so the
+// original argument retains its parsed form.
 type compiledArgument struct {
 	value ast.Comparable
 	expr  ast.Expr
@@ -63,7 +66,7 @@ func (c *compiler) walkQuery(q *ast.Query) error {
 				}
 			case *ast.SliceSelector:
 				if s.Step != nil && *s.Step == 0 {
-					// RFC 9535 §2.3.4：step=0 的 slice 语法合法，求值时返回空，此处无需报错。
+					// A zero step is valid under RFC 9535 section 2.3.4 and selects no nodes.
 				}
 			}
 		}
@@ -96,7 +99,7 @@ func (c *compiler) walkExpr(e ast.Expr) error {
 		if err := c.walkExpr(v.Right); err != nil {
 			return err
 		}
-		// 先检查子表达式，使未知函数和非法实参的错误优先于比较操作数的类型错误。
+		// Resolve operands first so function diagnostics precede comparison type errors.
 		if c.expressionType(v.Left) != exprTypeValue {
 			return &CompileError{Offset: v.Pos.Offset, Message: "left operand of comparison must have ValueType"}
 		}
@@ -156,8 +159,8 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 					if !errors.As(err, &syntaxErr) {
 						return err
 					}
-					// RFC 9535 §2.4.6、§2.4.7 规定：模式不符合 I-Regexp 时，match/search
-					// 的求值结果应为 LogicalFalse，因此此处不将无效模式作为查询编译错误返回。
+					// Invalid I-Regexp syntax makes match/search false under RFC 9535.
+					// Cache nil so evaluation preserves that result without recompiling.
 				}
 				c.regexes[pattern.Value.Str] = r
 			}
@@ -170,8 +173,9 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 	return nil
 }
 
-// compileArg 按 RFC 9535 §2.4.3 确定实参的求值方式。singular query 在 ValueType
-// 位置生成独立的访问路径；NodesType 到 LogicalType 的转换在求值时判断节点列表是否为空。
+// A query can supply ValueType only when its syntax guarantees at most one
+// node. NodesType can supply LogicalType through an existence test; JSON
+// values themselves have no implicit truth conversion.
 func (c *compiler) compileArg(arg ast.Expr, want exprType, fnName string, idx int) (compiledArgument, error) {
 	switch want {
 	case exprTypeValue:
@@ -226,7 +230,8 @@ func (c *compiler) compileArg(arg ast.Expr, want exprType, fnName string, idx in
 	return compiledArgument{}, argTypeError(fnName, idx, want, c.expressionType(arg), arg.Position())
 }
 
-// walkExpr 已编译子表达式中的函数调用，这里读取其中的返回类型。
+// Function calls must already have been resolved by walkExpr before their
+// result types can be used by the enclosing expression.
 func (c *compiler) expressionType(expr ast.Expr) exprType {
 	switch v := expr.(type) {
 	case ast.LogicalExpr:
