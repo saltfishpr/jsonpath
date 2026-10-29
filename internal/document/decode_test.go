@@ -21,9 +21,9 @@ func mustParse(t testing.TB, src string) *Node {
 // defaults for standalone scalars.
 func TestParseScalars(t *testing.T) {
 	type number struct {
-		digits   string
-		exponent int64
-		negative bool
+		digits    string
+		magnitude int64
+		negative  bool
 	}
 	tests := []struct {
 		name    string
@@ -45,25 +45,25 @@ func TestParseScalars(t *testing.T) {
 		{name: "negative zero", src: "-0", kind: KindNumber, number: &number{}, len: -1},
 		{
 			name: "fraction and exponent", src: "1.2300e+02", kind: KindNumber,
-			number: &number{digits: "123"}, len: -1,
+			number: &number{digits: "123", magnitude: 3}, len: -1,
 		},
 		{
 			name: "negative fraction", src: "-1.5", kind: KindNumber,
-			number: &number{digits: "15", exponent: -1, negative: true}, len: -1,
+			number: &number{digits: "15", magnitude: 1, negative: true}, len: -1,
 		},
 		{
 			name: "leading zeros of fraction", src: "0.000123", kind: KindNumber,
-			number: &number{digits: "123", exponent: -6}, len: -1,
+			number: &number{digits: "123", magnitude: -3}, len: -1,
 		},
 		{
 			name: "trailing zeros", src: "100", kind: KindNumber,
-			number: &number{digits: "1", exponent: 2}, len: -1,
+			number: &number{digits: "1", magnitude: 3}, len: -1,
 		},
 		{
 			name: "long integer keeps all digits", src: "1234567890123456789012345678901234567890", kind: KindNumber,
 			number: &number{
-				digits:   "123456789012345678901234567890123456789",
-				exponent: 1,
+				digits:    "123456789012345678901234567890123456789",
+				magnitude: 40,
 			},
 			len: -1,
 		},
@@ -88,14 +88,14 @@ func TestParseScalars(t *testing.T) {
 				if got.digits != tt.number.digits {
 					t.Errorf("Number().digits = %q, want %q", got.digits, tt.number.digits)
 				}
-				if got.exponent != tt.number.exponent {
-					t.Errorf("Number().exponent = %d, want %d", got.exponent, tt.number.exponent)
+				if got.magnitude != tt.number.magnitude {
+					t.Errorf("Number().magnitude = %d, want %d", got.magnitude, tt.number.magnitude)
 				}
 				if got.negative != tt.number.negative {
 					t.Errorf("Number().negative = %t, want %t", got.negative, tt.number.negative)
 				}
-				if got.bigExponent != nil {
-					t.Errorf("Number().bigExponent = %v, want nil", got.bigExponent)
+				if got.bigMagnitude != nil {
+					t.Errorf("Number().bigMagnitude = %v, want nil", got.bigMagnitude)
 				}
 			}
 			if got := n.Len(); got != tt.len {
@@ -123,15 +123,15 @@ func TestParseScalars(t *testing.T) {
 	}
 }
 
-// TestParseBigExponent checks promotion beyond int64 and demotion when decimal
-// normalization brings an exponent back into range.
-func TestParseBigExponent(t *testing.T) {
+// TestParseBigMagnitude checks promotion beyond int64 and demotion when the
+// digit count and decimal point bring the magnitude back into range.
+func TestParseBigMagnitude(t *testing.T) {
 	tests := []struct {
-		name         string
-		src          string
-		wantDigits   string
-		wantExponent int64
-		wantBig      bool
+		name          string
+		src           string
+		wantDigits    string
+		wantMagnitude int64
+		wantBig       bool
 	}{
 		{
 			name: "exponent overflows int64", src: "1e999999999999999999999",
@@ -146,8 +146,8 @@ func TestParseBigExponent(t *testing.T) {
 			wantDigits: "1", wantBig: true,
 		},
 		{
-			name: "overflow adjusted back into int64", src: "1.555e9223372036854775810",
-			wantDigits: "1555", wantExponent: math.MaxInt64,
+			name: "overflow adjusted back into int64", src: "0.001e9223372036854775809",
+			wantDigits: "1", wantMagnitude: math.MaxInt64,
 		},
 	}
 	for _, tt := range tests {
@@ -156,11 +156,11 @@ func TestParseBigExponent(t *testing.T) {
 			if num.digits != tt.wantDigits {
 				t.Errorf("digits = %q, want %q", num.digits, tt.wantDigits)
 			}
-			if got := num.bigExponent != nil; got != tt.wantBig {
-				t.Fatalf("bigExponent 是否存在 = %t, want %t", got, tt.wantBig)
+			if got := num.bigMagnitude != nil; got != tt.wantBig {
+				t.Fatalf("bigMagnitude 是否存在 = %t, want %t", got, tt.wantBig)
 			}
-			if !tt.wantBig && num.exponent != tt.wantExponent {
-				t.Errorf("exponent = %d, want %d", num.exponent, tt.wantExponent)
+			if !tt.wantBig && num.magnitude != tt.wantMagnitude {
+				t.Errorf("magnitude = %d, want %d", num.magnitude, tt.wantMagnitude)
 			}
 		})
 	}
@@ -183,7 +183,7 @@ func TestNodeConstructors(t *testing.T) {
 	if num.Kind() != KindNumber {
 		t.Errorf("NewNumber() Kind() = %v", num.Kind())
 	}
-	if got := num.Number(); got.digits != "12" || got.exponent != 2 || !got.negative {
+	if got := num.Number(); got.digits != "12" || got.magnitude != 4 || !got.negative {
 		t.Errorf("NewNumber(-1.20e3) = %+v", got)
 	}
 	str := NewString("中")

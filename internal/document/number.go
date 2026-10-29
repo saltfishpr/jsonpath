@@ -10,12 +10,12 @@ import (
 // Number holds an exact decimal value, including exponents outside int64 range.
 // Its zero value is numeric zero. Copies may be compared concurrently.
 type Number struct {
-	// Nonzero values use a coefficient without leading or trailing zeros and
-	// a power of ten. An empty coefficient represents zero regardless of exponent.
-	digits      string
-	exponent    int64
-	bigExponent *big.Int
-	negative    bool
+	negative bool
+	// Nonzero values use digits without leading or trailing zeros and a decimal
+	// magnitude (exponent plus digit count). Empty digits represent zero.
+	digits       string
+	magnitude    int64
+	bigMagnitude *big.Int // Non-nil only when the magnitude is outside int64.
 }
 
 // ParseNumber converts valid JSON number text without rounding. The caller must
@@ -43,32 +43,34 @@ func ParseNumber(s string) Number {
 		return n
 	}
 	n.digits = strings.TrimRight(s, "0")
-	adjustment := int64(len(s)-len(n.digits)) - int64(fraction)
-	if expText != "" {
-		exponent, err := strconv.ParseInt(expText, 10, 64)
-		if err == nil {
-			n.exponent = exponent
-		} else {
-			n.bigExponent = new(big.Int)
-			n.bigExponent.SetString(expText, 10)
-		}
+	adjustment := int64(len(s)) - int64(fraction)
+	if expText == "" {
+		n.magnitude = adjustment
+		return n
+	}
+	exponent, err := strconv.ParseInt(expText, 10, 64)
+	if err == nil {
+		n.magnitude = exponent
+	} else {
+		n.bigMagnitude = new(big.Int)
+		n.bigMagnitude.SetString(expText, 10)
 	}
 	if adjustment != 0 {
-		if n.bigExponent == nil {
-			if (adjustment > 0 && n.exponent > math.MaxInt64-adjustment) ||
-				(adjustment < 0 && n.exponent < math.MinInt64-adjustment) {
-				n.bigExponent = big.NewInt(n.exponent)
+		if n.bigMagnitude == nil {
+			if (adjustment > 0 && n.magnitude > math.MaxInt64-adjustment) ||
+				(adjustment < 0 && n.magnitude < math.MinInt64-adjustment) {
+				n.bigMagnitude = big.NewInt(n.magnitude)
 			} else {
-				n.exponent += adjustment
+				n.magnitude += adjustment
 			}
 		}
-		if n.bigExponent != nil {
-			n.bigExponent.Add(n.bigExponent, big.NewInt(adjustment))
+		if n.bigMagnitude != nil {
+			n.bigMagnitude.Add(n.bigMagnitude, big.NewInt(adjustment))
 		}
 	}
-	if n.bigExponent != nil && n.bigExponent.IsInt64() {
-		n.exponent = n.bigExponent.Int64()
-		n.bigExponent = nil
+	if n.bigMagnitude != nil && n.bigMagnitude.IsInt64() {
+		n.magnitude = n.bigMagnitude.Int64()
+		n.bigMagnitude = nil
 	}
 	return n
 }
@@ -99,57 +101,21 @@ func (n Number) compareAbs(other Number) int {
 	if other.digits == "" {
 		return 1
 	}
-	alen, blen := int64(len(n.digits)), int64(len(other.digits))
-	a, b := n.exponent, other.exponent
-	// Decimal magnitude is exponent plus digit count. Positive counts can only
-	// overflow upward, so ordinary exponents need no [big.Int] allocation.
-	if n.bigExponent == nil && other.bigExponent == nil &&
-		a <= math.MaxInt64-alen && b <= math.MaxInt64-blen {
-		a, b = a+alen, b+blen
-		if a < b {
+	if n.bigMagnitude == nil && other.bigMagnitude == nil {
+		if n.magnitude < other.magnitude {
 			return -1
 		}
-		if a > b {
+		if n.magnitude > other.magnitude {
 			return 1
 		}
-	} else {
-		var x, y big.Int
-		if n.bigExponent != nil {
-			x.Set(n.bigExponent)
-		} else {
-			x.SetInt64(a)
-		}
-		if other.bigExponent != nil {
-			y.Set(other.bigExponent)
-		} else {
-			y.SetInt64(b)
-		}
-		x.Add(&x, big.NewInt(alen))
-		y.Add(&y, big.NewInt(blen))
-		if c := x.Cmp(&y); c != 0 {
-			return c
-		}
+	} else if n.bigMagnitude == nil {
+		return -other.bigMagnitude.Sign()
+	} else if other.bigMagnitude == nil {
+		return n.bigMagnitude.Sign()
+	} else if c := n.bigMagnitude.Cmp(other.bigMagnitude); c != 0 {
+		return c
 	}
-	// Equal magnitudes align the first digits. Implicit trailing zeros let us
-	// compare coefficients without allocating strings proportional to the exponent.
-	length := len(n.digits)
-	if len(other.digits) > length {
-		length = len(other.digits)
-	}
-	for i := 0; i < length; i++ {
-		a, b := byte('0'), byte('0')
-		if i < len(n.digits) {
-			a = n.digits[i]
-		}
-		if i < len(other.digits) {
-			b = other.digits[i]
-		}
-		if a < b {
-			return -1
-		}
-		if a > b {
-			return 1
-		}
-	}
-	return 0
+	// Equal magnitudes align the first digits. With no trailing zeros, a longer
+	// coefficient always exceeds its prefix even when that prefix is zero-padded.
+	return strings.Compare(n.digits, other.digits)
 }
