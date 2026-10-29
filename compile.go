@@ -9,9 +9,45 @@ import (
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
 
+// exprType 对应 RFC 9535 §2.4.1 的三种类型。
+type exprType uint8
+
+const (
+	exprTypeInvalid exprType = iota
+	exprTypeValue
+	exprTypeLogical
+	exprTypeNodes
+)
+
+func (t exprType) String() string {
+	switch t {
+	case exprTypeValue:
+		return "ValueType"
+	case exprTypeLogical:
+		return "LogicalType"
+	case exprTypeNodes:
+		return "NodesType"
+	}
+	return "invalid"
+}
+
+// 编译结果单独保存，成功和失败的编译都不修改输入 AST。
 type compiler struct {
-	literals map[*ast.Literal]*document.Node
-	regexes  map[string]*iregexp.Regexp
+	functions map[*ast.FunctionCall]compiledFunctionCall
+	literals  map[*ast.Literal]*document.Node
+	regexes   map[string]*iregexp.Regexp
+}
+
+type compiledFunctionCall struct {
+	definition functionDefinition
+	arguments  []compiledArgument
+}
+
+// 形参类型决定有效字段：ValueType 使用 value，LogicalType/NodesType 使用 expr。
+// 派生的 singular query 由编译结果持有，避免替换 AST 中的原始实参。
+type compiledArgument struct {
+	value ast.Comparable
+	expr  ast.Expr
 }
 
 func (c *compiler) walkQuery(q *ast.Query) error {
@@ -22,7 +58,7 @@ func (c *compiler) walkQuery(q *ast.Query) error {
 				if err := c.walkExpr(s.Expr); err != nil {
 					return err
 				}
-				if s.Expr.Type() != ast.TypeLogical {
+				if c.expressionType(s.Expr) != exprTypeLogical {
 					return &CompileError{Offset: s.Pos.Offset, Message: "filter expression must be LogicalType"}
 				}
 			case *ast.SliceSelector:
@@ -60,18 +96,18 @@ func (c *compiler) walkExpr(e ast.Expr) error {
 		if err := c.walkExpr(v.Right); err != nil {
 			return err
 		}
-		// 函数返回类型要等到签名解析后才知道，所以比较操作数的类型检查放在子节点走完之后。
-		if v.Left.Type() != ast.TypeValue {
+		// 先检查子表达式，使未知函数和非法实参的错误优先于比较操作数的类型错误。
+		if c.expressionType(v.Left) != exprTypeValue {
 			return &CompileError{Offset: v.Pos.Offset, Message: "left operand of comparison must have ValueType"}
 		}
-		if v.Right.Type() != ast.TypeValue {
+		if c.expressionType(v.Right) != exprTypeValue {
 			return &CompileError{Offset: v.Pos.Offset, Message: "right operand of comparison must have ValueType"}
 		}
 	case *ast.TestExpr:
 		if err := c.walkExpr(v.Target); err != nil {
 			return err
 		}
-		if v.Target.Type() == ast.TypeValue {
+		if c.expressionType(v.Target) == exprTypeValue {
 			return &CompileError{Offset: v.Pos.Offset, Message: "test expression requires LogicalType or NodesType, got ValueType"}
 		}
 	case *ast.FilterQuery:
@@ -96,17 +132,17 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 	if len(f.Args) != len(def.params) {
 		return &CompileError{Offset: f.Pos.Offset, Message: fmt.Sprintf("function %q: expected %d arguments, got %d", f.Name, len(def.params), len(f.Args))}
 	}
+	function := compiledFunctionCall{definition: def, arguments: make([]compiledArgument, len(f.Args))}
 	for i, arg := range f.Args {
 		if err := c.walkExpr(arg); err != nil {
 			return err
 		}
-		adapted, err := adaptArg(arg, def.params[i], f.Name, i)
+		var err error
+		function.arguments[i], err = c.compileArg(arg, def.params[i], f.Name, i)
 		if err != nil {
 			return err
 		}
-		f.Args[i] = adapted
 	}
-	f.Ret = def.result
 	if f.Name == "match" || f.Name == "search" {
 		if pattern, ok := f.Args[1].(*ast.Literal); ok && pattern.Value.Kind == ast.LitString {
 			if c.regexes == nil {
@@ -127,63 +163,103 @@ func (c *compiler) resolveFunction(f *ast.FunctionCall) error {
 			}
 		}
 	}
+	if c.functions == nil {
+		c.functions = make(map[*ast.FunctionCall]compiledFunctionCall)
+	}
+	c.functions[f] = function
 	return nil
 }
 
-// adaptArg 按 RFC 9535 §2.4.3 将实参调整为形参期望的类型：singular query 可以以
-// ValueType 传入，NodesType 按节点列表是否非空隐式转为 LogicalType（在求值时
-// 完成）。转换不成立时返回 CompileError。
-func adaptArg(arg ast.Expr, want ast.ExprType, fnName string, idx int) (ast.Expr, error) {
+// compileArg 按 RFC 9535 §2.4.3 确定实参的求值方式。singular query 在 ValueType
+// 位置生成独立的访问路径；NodesType 到 LogicalType 的转换在求值时判断节点列表是否为空。
+func (c *compiler) compileArg(arg ast.Expr, want exprType, fnName string, idx int) (compiledArgument, error) {
 	switch want {
-	case ast.TypeValue:
+	case exprTypeValue:
 		switch v := arg.(type) {
-		case *ast.Literal, *ast.SingularQuery:
-			return arg, nil
+		case *ast.Literal:
+			return compiledArgument{value: v}, nil
+		case *ast.SingularQuery:
+			return compiledArgument{value: v}, nil
 		case *ast.FunctionCall:
-			if v.Ret != ast.TypeValue {
-				return nil, argTypeError(fnName, idx, want, v.Ret, v.Pos)
+			if got := c.expressionType(v); got != exprTypeValue {
+				return compiledArgument{}, argTypeError(fnName, idx, want, got, v.Pos)
 			}
-			return arg, nil
+			return compiledArgument{value: v}, nil
 		case *ast.FilterQuery:
 			segs, ok := toSingularSegments(v.Query.Segments)
 			if !ok {
-				return nil, &CompileError{
+				return compiledArgument{}, &CompileError{
 					Offset:  v.Pos.Offset,
 					Message: fmt.Sprintf("function %q arg %d: expected ValueType or singular query", fnName, idx+1),
 				}
 			}
-			return &ast.SingularQuery{
-				IsRoot:   v.Query.IsRoot,
-				Segments: segs,
-				Pos:      v.Pos,
+			return compiledArgument{
+				value: &ast.SingularQuery{
+					IsRoot:   v.Query.IsRoot,
+					Segments: segs,
+					Pos:      v.Pos,
+				},
 			}, nil
 		}
-	case ast.TypeLogical:
+	case exprTypeLogical:
 		if _, ok := arg.(ast.LogicalExpr); ok {
-			return arg, nil
+			return compiledArgument{expr: arg}, nil
 		}
 		switch v := arg.(type) {
 		case *ast.FilterQuery:
-			return arg, nil
+			return compiledArgument{expr: arg}, nil
 		case *ast.FunctionCall:
-			if v.Ret == ast.TypeLogical || v.Ret == ast.TypeNodes {
-				return arg, nil
+			if got := c.expressionType(v); got == exprTypeLogical || got == exprTypeNodes {
+				return compiledArgument{expr: arg}, nil
 			}
 		}
-	case ast.TypeNodes:
+	case exprTypeNodes:
 		switch v := arg.(type) {
 		case *ast.FilterQuery, *ast.SingularQuery:
-			return arg, nil
+			return compiledArgument{expr: arg}, nil
 		case *ast.FunctionCall:
-			if v.Ret == ast.TypeNodes {
-				return arg, nil
+			if c.expressionType(v) == exprTypeNodes {
+				return compiledArgument{expr: arg}, nil
 			}
 		}
 	}
-	return nil, argTypeError(fnName, idx, want, arg.Type(), arg.Position())
+	return compiledArgument{}, argTypeError(fnName, idx, want, c.expressionType(arg), arg.Position())
 }
 
-func argTypeError(fnName string, idx int, want, got ast.ExprType, pos ast.Pos) error {
+// walkExpr 已编译子表达式中的函数调用，这里读取其中的返回类型。
+func (c *compiler) expressionType(expr ast.Expr) exprType {
+	switch v := expr.(type) {
+	case ast.LogicalExpr:
+		return exprTypeLogical
+	case *ast.Literal, *ast.SingularQuery:
+		return exprTypeValue
+	case *ast.FilterQuery:
+		return exprTypeNodes
+	case *ast.FunctionCall:
+		return c.functions[v].definition.result
+	default:
+		panic(fmt.Sprintf("jsonpath: unexpected expression %T", expr))
+	}
+}
+
+func literalValue(l *ast.Literal) *document.Node {
+	switch l.Value.Kind {
+	case ast.LitNull:
+		return document.NewNull()
+	case ast.LitBool:
+		if l.Value.Bool {
+			return document.NewTrue()
+		}
+		return document.NewFalse()
+	case ast.LitInt, ast.LitFloat:
+		return document.NewNumber(l.Value.Raw)
+	case ast.LitString:
+		return document.NewString(l.Value.Str)
+	}
+	return document.NewNull()
+}
+
+func argTypeError(fnName string, idx int, want, got exprType, pos ast.Pos) error {
 	return &CompileError{
 		Offset:  pos.Offset,
 		Message: fmt.Sprintf("function %q arg %d: expected %s, got %s", fnName, idx+1, want, got),

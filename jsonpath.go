@@ -16,10 +16,11 @@ import (
 // Query 是可重复执行的编译查询，可由多个 goroutine 并发使用。
 // 零值不可用，必须由 Compile 创建。
 type Query struct {
-	src      string
-	query    *ast.Query
-	literals map[*ast.Literal]*document.Node
-	regexes  map[string]*iregexp.Regexp
+	src       string
+	query     *ast.Query
+	functions map[*ast.FunctionCall]compiledFunctionCall
+	literals  map[*ast.Literal]*document.Node
+	regexes   map[string]*iregexp.Regexp
 }
 
 // Compile 编译查询串。词法、语法和语义错误返回 *CompileError。
@@ -36,7 +37,13 @@ func Compile(src string) (*Query, error) {
 	if err := c.walkQuery(q); err != nil {
 		return nil, err
 	}
-	return &Query{src: src, query: q, literals: c.literals, regexes: c.regexes}, nil
+	return &Query{
+		src:       src,
+		query:     q,
+		functions: c.functions,
+		literals:  c.literals,
+		regexes:   c.regexes,
+	}, nil
 }
 
 // Values 返回按选择顺序排列的原始 JSON 片段，保留重复项。

@@ -51,14 +51,15 @@ func (e *evaluator) evalLogical(expr ast.Expr, cur *document.Node) (bool, error)
 		}
 		return len(nodes) > 0, nil
 	case *ast.FunctionCall:
-		r, err := e.callFunction(v, cur)
+		function := e.functions[v]
+		r, err := e.callFunction(v, function, cur)
 		if err != nil {
 			return false, err
 		}
-		switch v.Ret {
-		case ast.TypeLogical:
+		switch function.definition.result {
+		case exprTypeLogical:
 			return r.logical, nil
-		case ast.TypeNodes:
+		case exprTypeNodes:
 			return len(r.nodes) > 0, nil
 		}
 	}
@@ -85,7 +86,7 @@ func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (*docum
 		val, nothing := e.evalSingularQuery(v, cur)
 		return val, nothing, nil
 	case *ast.FunctionCall:
-		r, err := e.callFunction(v, cur)
+		r, err := e.callFunction(v, e.functions[v], cur)
 		if err != nil {
 			return nil, false, err
 		}
@@ -95,23 +96,6 @@ func (e *evaluator) evalComparable(c ast.Comparable, cur *document.Node) (*docum
 		return r.value, false, nil
 	}
 	return nil, true, nil
-}
-
-func literalValue(l *ast.Literal) *document.Node {
-	switch l.Value.Kind {
-	case ast.LitNull:
-		return document.NewNull()
-	case ast.LitBool:
-		if l.Value.Bool {
-			return document.NewTrue()
-		}
-		return document.NewFalse()
-	case ast.LitInt, ast.LitFloat:
-		return document.NewNumber(l.Value.Raw)
-	case ast.LitString:
-		return document.NewString(l.Value.Str)
-	}
-	return document.NewNull()
 }
 
 func (e *evaluator) evalSingularQuery(q *ast.SingularQuery, cur *document.Node) (*document.Node, bool) {
@@ -153,11 +137,12 @@ func (e *evaluator) evalNodes(expr ast.Expr, cur *document.Node) ([]*document.No
 		}
 		return nil, nil
 	case *ast.FunctionCall:
-		r, err := e.callFunction(v, cur)
+		function := e.functions[v]
+		r, err := e.callFunction(v, function, cur)
 		if err != nil {
 			return nil, err
 		}
-		if v.Ret == ast.TypeNodes {
+		if function.definition.result == exprTypeNodes {
 			return r.nodes, nil
 		}
 	}
@@ -253,14 +238,13 @@ func compareLt(a *document.Node, aNothing bool, b *document.Node, bNothing bool)
 	return false
 }
 
-func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) (functionValue, error) {
-	def := builtinFunctions[f.Name]
+func (e *evaluator) callFunction(f *ast.FunctionCall, compiledFunc compiledFunctionCall, cur *document.Node) (functionValue, error) {
 	// 内置函数最多接收两个参数；直接分派调用可让参数缓冲留在栈上。
 	var storage [2]functionValue
-	args := storage[:len(f.Args)]
-	for i, arg := range f.Args {
+	args := storage[:len(compiledFunc.arguments)]
+	for i, arg := range compiledFunc.arguments {
 		var err error
-		args[i], err = e.prepareArg(arg, def.params[i], cur)
+		args[i], err = e.prepareArg(arg, compiledFunc.definition.params[i], cur)
 		if err != nil {
 			return functionValue{}, err
 		}
@@ -279,23 +263,22 @@ func (e *evaluator) callFunction(f *ast.FunctionCall, cur *document.Node) (funct
 	}
 }
 
-func (e *evaluator) prepareArg(expr ast.Expr, want ast.ExprType, cur *document.Node) (functionValue, error) {
+func (e *evaluator) prepareArg(arg compiledArgument, want exprType, cur *document.Node) (functionValue, error) {
 	switch want {
-	case ast.TypeValue:
-		// 编译阶段的 adaptArg 已检查类型并转换 singular query，保证此处实现了 Comparable。
-		v, nothing, err := e.evalComparable(expr.(ast.Comparable), cur)
+	case exprTypeValue:
+		v, nothing, err := e.evalComparable(arg.value, cur)
 		if err != nil {
 			return functionValue{}, err
 		}
 		return functionValue{value: v, nothing: nothing}, nil
-	case ast.TypeLogical:
-		logical, err := e.evalLogical(expr, cur)
+	case exprTypeLogical:
+		logical, err := e.evalLogical(arg.expr, cur)
 		if err != nil {
 			return functionValue{}, err
 		}
 		return functionValue{logical: logical}, nil
-	case ast.TypeNodes:
-		nodes, err := e.evalNodes(expr, cur)
+	case exprTypeNodes:
+		nodes, err := e.evalNodes(arg.expr, cur)
 		if err != nil {
 			return functionValue{}, err
 		}

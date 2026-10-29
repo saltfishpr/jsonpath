@@ -82,36 +82,9 @@ func (n *IndexSelector) Position() Pos    { return n.Pos }
 func (n *SliceSelector) Position() Pos    { return n.Pos }
 func (n *FilterSelector) Position() Pos   { return n.Pos }
 
-// ExprType 对应 RFC 9535 §2.4.1 的三种类型。
-type ExprType uint8
-
-const (
-	// TypeValue represents ValueType: a JSON value or Nothing.
-	TypeValue ExprType = iota
-	// TypeLogical represents LogicalType: LogicalTrue or LogicalFalse.
-	TypeLogical
-	// TypeNodes represents NodesType: a node list.
-	TypeNodes
-)
-
-// String returns the RFC 9535 name of the expression type.
-func (t ExprType) String() string {
-	switch t {
-	case TypeValue:
-		return "ValueType"
-	case TypeLogical:
-		return "LogicalType"
-	case TypeNodes:
-		return "NodesType"
-	}
-	return "unknown"
-}
-
 // Expr 表示 filter 中的表达式。
 type Expr interface {
 	exprNode()
-	// Type 返回表达式的类型。
-	Type() ExprType
 	// Position 返回表达式的源码位置。
 	Position() Pos
 }
@@ -211,13 +184,6 @@ func (*ParenExpr) exprNode()      {}
 func (*ComparisonExpr) exprNode() {}
 func (*TestExpr) exprNode()       {}
 
-func (*OrExpr) Type() ExprType         { return TypeLogical }
-func (*AndExpr) Type() ExprType        { return TypeLogical }
-func (*NotExpr) Type() ExprType        { return TypeLogical }
-func (*ParenExpr) Type() ExprType      { return TypeLogical }
-func (*ComparisonExpr) Type() ExprType { return TypeLogical }
-func (*TestExpr) Type() ExprType       { return TypeLogical }
-
 func (e *OrExpr) Position() Pos         { return e.Pos }
 func (e *AndExpr) Position() Pos        { return e.Pos }
 func (e *NotExpr) Position() Pos        { return e.Pos }
@@ -281,7 +247,6 @@ type SingularSegment struct {
 type FunctionCall struct {
 	Name string
 	Args []Expr
-	Ret  ExprType // 函数返回类型，在编译阶段设置。
 	Pos  Pos
 }
 
@@ -295,14 +260,6 @@ func (*Literal) exprNode()       {}
 func (*SingularQuery) exprNode() {}
 func (*FunctionCall) exprNode()  {}
 func (*FilterQuery) exprNode()   {}
-
-func (*Literal) Type() ExprType { return TypeValue }
-
-// Type 返回 ValueType；单节点查询作为比较操作数时按此类型处理。
-func (*SingularQuery) Type() ExprType { return TypeValue }
-
-func (f *FunctionCall) Type() ExprType { return f.Ret }
-func (*FilterQuery) Type() ExprType    { return TypeNodes }
 
 func (n *Literal) Position() Pos       { return n.Pos }
 func (n *SingularQuery) Position() Pos { return n.Pos }

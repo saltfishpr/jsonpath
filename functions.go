@@ -4,7 +4,6 @@ import (
 	"errors"
 	"strconv"
 
-	"github.com/saltfishpr/jsonpath/internal/ast"
 	"github.com/saltfishpr/jsonpath/internal/document"
 	"github.com/saltfishpr/jsonpath/internal/iregexp"
 )
@@ -18,16 +17,16 @@ type functionValue struct {
 }
 
 type functionDefinition struct {
-	params []ast.ExprType
-	result ast.ExprType
+	params []exprType
+	result exprType
 }
 
 var builtinFunctions = map[string]functionDefinition{
-	"length": {[]ast.ExprType{ast.TypeValue}, ast.TypeValue},
-	"count":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
-	"value":  {[]ast.ExprType{ast.TypeNodes}, ast.TypeValue},
-	"match":  {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
-	"search": {[]ast.ExprType{ast.TypeValue, ast.TypeValue}, ast.TypeLogical},
+	"length": {[]exprType{exprTypeValue}, exprTypeValue},
+	"count":  {[]exprType{exprTypeNodes}, exprTypeValue},
+	"value":  {[]exprType{exprTypeNodes}, exprTypeValue},
+	"match":  {[]exprType{exprTypeValue, exprTypeValue}, exprTypeLogical},
+	"search": {[]exprType{exprTypeValue, exprTypeValue}, exprTypeLogical},
 }
 
 func lengthFn(args []functionValue) (functionValue, error) {

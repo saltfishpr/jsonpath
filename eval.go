@@ -7,14 +7,20 @@ import (
 )
 
 func (q *Query) run(doc *Document) ([]*document.Node, error) {
-	ev := &evaluator{root: doc.root, literals: q.literals, regexes: q.regexes}
+	ev := &evaluator{
+		root:      doc.root,
+		functions: q.functions,
+		literals:  q.literals,
+		regexes:   q.regexes,
+	}
 	return ev.query(q.query, doc.root)
 }
 
 type evaluator struct {
-	root     *document.Node
-	literals map[*ast.Literal]*document.Node
-	regexes  map[string]*iregexp.Regexp
+	root      *document.Node
+	functions map[*ast.FunctionCall]compiledFunctionCall
+	literals  map[*ast.Literal]*document.Node
+	regexes   map[string]*iregexp.Regexp
 
 	// 本次求值遇到的动态模式，按需创建。
 	dynamicRegexes map[string]*iregexp.Regexp
